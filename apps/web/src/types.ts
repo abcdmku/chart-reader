@@ -33,6 +33,8 @@ export type Run = {
   extracted_at: string;
   rows_inserted: number;
   raw_result_json: string;
+  status: 'completed' | 'error' | 'cancelled';
+  error: string | null;
 };
 
 export type StateResponse = {

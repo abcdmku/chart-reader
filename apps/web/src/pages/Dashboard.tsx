@@ -29,6 +29,7 @@ export function Dashboard({ state }: { state: AppState }) {
     onSetModel,
     onTogglePause,
     onSetLatestOnly,
+    onSetActiveRun,
   } = state;
 
   const rows = rowsState?.rows ?? [];
@@ -232,7 +233,7 @@ export function Dashboard({ state }: { state: AppState }) {
         onNavigate={setModalImage}
       />
 
-      <RunDetailsModal jobId={runDetailsJobId} onClose={() => setRunDetailsJobId(null)} />
+      <RunDetailsModal jobId={runDetailsJobId} onClose={() => setRunDetailsJobId(null)} onSetActiveRun={onSetActiveRun} />
     </div>
   );
 }

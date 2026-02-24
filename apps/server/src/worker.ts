@@ -19,6 +19,8 @@ type WorkerPaths = {
   outputCsvPath: string;
 };
 
+type RunStatus = 'completed' | 'error' | 'cancelled';
+
 class JobCancelledError extends Error {
   constructor(message = 'Cancelled') {
     super(message);
@@ -173,6 +175,37 @@ export class Worker {
     this.updateJob(jobId);
   }
 
+  private recordRun(args: {
+    runId: string;
+    jobId: string;
+    model: string;
+    extractedAt: string;
+    rowsInserted: number;
+    rawResultJson: string;
+    status: RunStatus;
+    error: string | null;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO runs (run_id, job_id, model, extracted_at, rows_inserted, raw_result_json, status, error)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        args.runId,
+        args.jobId,
+        args.model,
+        args.extractedAt,
+        args.rowsInserted,
+        args.rawResultJson,
+        args.status,
+        args.error,
+      );
+  }
+
+  private updateRunStatus(runId: string, status: RunStatus, error: string | null): void {
+    this.db.prepare('UPDATE runs SET status = ?, error = ? WHERE run_id = ?').run(status, error, runId);
+  }
+
   private setCompleted(args: { jobId: string; runId: string; rowsAppended: number; filename: string; fileLocation: FileLocation }): void {
     const now = new Date().toISOString();
     this.db
@@ -251,18 +284,20 @@ export class Worker {
   }
 
   private async processJob(initialJob: Job, model: string): Promise<void> {
-    const apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY?.trim();
-    if (!apiKey) {
-      this.setError(initialJob.id, 'GOOGLE_GENERATIVE_AI_API_KEY is not set');
-      await this.tick();
-      return;
-    }
+    const runId = nanoid();
+    let runRecorded = false;
+    let rawResultJson = '';
 
     let job = initialJob;
     const controller = new AbortController();
     this.activeControllers.set(job.id, controller);
 
     try {
+      this.throwIfCancelled(job.id, controller.signal);
+
+      const apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY?.trim();
+      if (!apiKey) throw new Error('GOOGLE_GENERATIVE_AI_API_KEY is not set');
+
       this.throwIfCancelled(job.id, controller.signal);
       this.setProgress(job.id, 'validating_file');
 
@@ -282,9 +317,7 @@ export class Worker {
 
       if (!filePath) {
         this.db.prepare("UPDATE jobs SET file_location = 'missing' WHERE id = ?").run(job.id);
-        this.setError(job.id, `File not found in new/completed: ${job.filename}`);
-        await this.tick();
-        return;
+        throw new Error(`File not found in new/completed: ${job.filename}`);
       }
 
       this.db.prepare('UPDATE jobs SET file_location = ? WHERE id = ?').run(fileLocation, job.id);
@@ -292,9 +325,7 @@ export class Worker {
 
       const entryDate = job.entry_date ?? parseEntryDate(job.filename);
       if (!entryDate) {
-        this.setError(job.id, 'Date not found in filename (expected YYYY-MM-DD)');
-        await this.tick();
-        return;
+        throw new Error('Date not found in filename (expected YYYY-MM-DD)');
       }
       if (job.entry_date !== entryDate) {
         this.db.prepare('UPDATE jobs SET entry_date = ? WHERE id = ?').run(entryDate, job.id);
@@ -303,26 +334,22 @@ export class Worker {
 
       const mimeType = mime.lookup(job.filename) || '';
       if (!mimeType.startsWith('image/')) {
-        this.setError(job.id, `Unsupported file type: ${mimeType || 'unknown'}`);
-        await this.tick();
-        return;
+        throw new Error(`Unsupported file type: ${mimeType || 'unknown'}`);
       }
 
       this.throwIfCancelled(job.id, controller.signal);
       this.setProgress(job.id, 'extracting');
       const image = await fsp.readFile(filePath);
       const extraction = await extractChartRows({ image, mimeType, model, abortSignal: controller.signal });
+      rawResultJson = extraction.rawResultJson;
       const extractedRows = extraction.result.rows;
 
       if (extractedRows.length === 0) {
-        this.setError(job.id, 'No rows extracted');
-        await this.tick();
-        return;
+        throw new Error('No rows extracted');
       }
 
       this.throwIfCancelled(job.id, controller.signal);
       this.setProgress(job.id, 'writing_db');
-      const runId = nanoid();
       const extractedAt = new Date().toISOString();
 
       const insert = this.db.prepare(
@@ -347,10 +374,10 @@ export class Worker {
       withTransaction(this.db, () => {
         this.db
           .prepare(
-            `INSERT INTO runs (run_id, job_id, model, extracted_at, rows_inserted, raw_result_json)
-             VALUES (?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO runs (run_id, job_id, model, extracted_at, rows_inserted, raw_result_json, status, error)
+             VALUES (?, ?, ?, ?, ?, ?, 'completed', NULL)`,
           )
-          .run(runId, job.id, model, extractedAt, extractedRows.length, extraction.rawResultJson);
+          .run(runId, job.id, model, extractedAt, extractedRows.length, rawResultJson);
 
         for (const row of extractedRows) {
           insert.run(
@@ -371,6 +398,7 @@ export class Worker {
           );
         }
       });
+      runRecorded = true;
 
       let finalFilename = job.filename;
       let finalLocation: FileLocation = fileLocation;
@@ -413,8 +441,37 @@ export class Worker {
       if (error instanceof JobCancelledError || controller.signal.aborted || isAbortError(error)) {
         const message = error instanceof Error ? error.message : 'Cancelled';
         this.setCancelled(job.id, message || 'Cancelled');
+        if (runRecorded) {
+          this.updateRunStatus(runId, 'cancelled', message || 'Cancelled');
+        } else {
+          this.recordRun({
+            runId,
+            jobId: job.id,
+            model,
+            extractedAt: new Date().toISOString(),
+            rowsInserted: 0,
+            rawResultJson,
+            status: 'cancelled',
+            error: message || 'Cancelled',
+          });
+        }
       } else {
-        this.setError(job.id, (error as Error).message);
+        const message = error instanceof Error ? error.message : String(error);
+        this.setError(job.id, message);
+        if (runRecorded) {
+          this.updateRunStatus(runId, 'error', message);
+        } else {
+          this.recordRun({
+            runId,
+            jobId: job.id,
+            model,
+            extractedAt: new Date().toISOString(),
+            rowsInserted: 0,
+            rawResultJson,
+            status: 'error',
+            error: message,
+          });
+        }
       }
     } finally {
       this.activeControllers.delete(job.id);

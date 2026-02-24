@@ -369,6 +369,41 @@ app.post('/api/jobs/:id/stop', (req, res) => {
   res.json({ ok: true });
 });
 
+app.post('/api/jobs/:id/active-run', (req, res) => {
+  const jobId = req.params.id;
+  const body = (req.body ?? {}) as { run_id?: unknown };
+  const runId = typeof body.run_id === 'string' ? body.run_id : null;
+
+  if (!runId) {
+    res.status(400).json({ error: 'run_id is required' });
+    return;
+  }
+
+  const job = db.prepare('SELECT * FROM jobs WHERE id = ?').get(jobId) as Job | undefined;
+  if (!job) {
+    res.status(404).json({ error: 'job not found' });
+    return;
+  }
+
+  const run = db.prepare('SELECT rows_inserted FROM runs WHERE run_id = ? AND job_id = ?').get(runId, jobId) as
+    | { rows_inserted: number }
+    | undefined;
+  if (!run) {
+    res.status(404).json({ error: 'run not found for this job' });
+    return;
+  }
+  if ((run.rows_inserted ?? 0) <= 0) {
+    res.status(400).json({ error: 'run has no extracted rows' });
+    return;
+  }
+
+  db.prepare('UPDATE jobs SET last_run_id = ? WHERE id = ?').run(runId, jobId);
+
+  const updated = db.prepare('SELECT * FROM jobs WHERE id = ?').get(jobId) as Job;
+  sse.send('job', updated);
+  res.json({ ok: true });
+});
+
 app.get('/api/jobs/:id/run', (req, res) => {
   const jobId = req.params.id;
   const job = db.prepare('SELECT * FROM jobs WHERE id = ?').get(jobId) as Job | undefined;
@@ -384,6 +419,8 @@ app.get('/api/jobs/:id/run', (req, res) => {
     extracted_at: string;
     rows_inserted: number;
     raw_result_json: string;
+    status: string;
+    error: string | null;
   };
 
   const runs = db

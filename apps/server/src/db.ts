@@ -104,6 +104,7 @@ export function migrate(db: Db): void {
   ).run(defaultModel);
 
   migrateJobsTable(db);
+  migrateRunsTable(db);
 }
 
 type TableInfoRow = { name: string };
@@ -138,6 +139,17 @@ function migrateJobsTable(db: Db): void {
 
   backfillCanonicalFilenames(db);
   mergeDuplicateJobs(db);
+}
+
+function migrateRunsTable(db: Db): void {
+  const columns = getTableColumnNames(db, 'runs');
+
+  if (!columns.has('status')) {
+    db.exec(`ALTER TABLE runs ADD COLUMN status TEXT NOT NULL DEFAULT 'completed';`);
+  }
+  if (!columns.has('error')) {
+    db.exec(`ALTER TABLE runs ADD COLUMN error TEXT NULL;`);
+  }
 }
 
 function backfillCanonicalFilenames(db: Db): void {

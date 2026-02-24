@@ -332,16 +332,16 @@ export function ChartDataTable({ rows, totalRows, latestOnly, onLatestOnlyChange
         <div className="flex items-center gap-3 text-xs text-zinc-500">
           <label
             className="flex cursor-pointer select-none items-center gap-2 text-xs text-zinc-500 hover:text-zinc-300"
-            title="Hide duplicate rows from earlier reruns"
+            title="Show only data from the active run of each chart"
           >
             <input
               type="checkbox"
               checked={latestOnly}
               onChange={(e) => void onLatestOnlyChange(e.currentTarget.checked)}
               className="h-4 w-4 cursor-pointer rounded border border-zinc-700 bg-zinc-900 accent-emerald-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-zinc-400"
-              aria-label="Latest run only"
+              aria-label="Active run only"
             />
-            Latest only
+            Active only
           </label>
           <span>
             {filteredCount !== totalRows

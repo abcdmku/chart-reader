@@ -67,3 +67,12 @@ export async function deleteJob(jobId: string): Promise<void> {
   if (!response.ok) throw new Error('Failed to delete job');
 }
 
+export async function setJobActiveRun(jobId: string, runId: string): Promise<void> {
+  const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/active-run`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ run_id: runId }),
+  });
+  if (!response.ok) throw new Error('Failed to set active run');
+}
+

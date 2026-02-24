@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { deleteJob, getRows, getState, rerunJob, scan, stopJob, updateConfig, uploadFiles } from './api';
+import { deleteJob, getRows, getState, rerunJob, scan, setJobActiveRun, stopJob, updateConfig, uploadFiles } from './api';
 import type { Config, Job, RowsResponse } from './types';
 
 const LS_LATEST_ONLY = 'chart-view-latest-only';
@@ -60,6 +60,7 @@ export type AppState = {
   onRerun: (jobId: string) => Promise<void>;
   onStop: (jobId: string) => Promise<void>;
   onDelete: (jobId: string) => Promise<void>;
+  onSetActiveRun: (jobId: string, runId: string) => Promise<void>;
 };
 
 export function useAppState(): AppState {
@@ -288,6 +289,16 @@ export function useAppState(): AppState {
     }
   }, []);
 
+  const onSetActiveRun = useCallback(async (jobId: string, runId: string) => {
+    try {
+      setError(null);
+      await setJobActiveRun(jobId, runId);
+      await refreshRows();
+    } catch (e: unknown) {
+      setError((e as Error).message);
+    }
+  }, [refreshRows]);
+
   return {
     config,
     jobs,
@@ -307,5 +318,6 @@ export function useAppState(): AppState {
     onRerun,
     onStop,
     onDelete,
+    onSetActiveRun,
   };
 }

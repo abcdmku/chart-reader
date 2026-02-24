@@ -308,14 +308,18 @@ function JobItem({
           <span className="font-mono text-xs font-semibold text-zinc-200">
             {job.entry_date ?? '—'}
           </span>
+          {job.version_count > 1 ? (
+            <span className="rounded bg-zinc-800/70 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-zinc-200">
+              {job.version_count} versions
+            </span>
+          ) : null}
         </div>
         <div className="mt-0.5 truncate text-xs text-zinc-500" title={chartLabel(displayFilename)}>
           {chartLabel(displayFilename)}
         </div>
         <div className="mt-0.5 flex items-center gap-2 text-xs text-zinc-600">
           <span>{job.status}</span>
-          {job.version_count > 1 ? <span>Â· {job.version_count} versions</span> : null}
-          {job.pending_filename ? <span>Â· pending upload</span> : null}
+          {job.pending_filename ? <span>· pending upload</span> : null}
           {job.rows_appended_last_run != null ? (
             <span>· {job.rows_appended_last_run} rows</span>
           ) : null}
@@ -336,7 +340,7 @@ function JobItem({
             aria-label="Stop"
             title="Stop"
           >
-            ⏹
+            ⏹︎
           </button>
         ) : (
           <button
