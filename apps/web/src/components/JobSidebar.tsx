@@ -29,6 +29,9 @@ const STEP_LABELS: Record<string, string> = {
   starting: 'Starting',
   validating_file: 'Validating',
   extracting: 'Extracting',
+  validating_extraction: 'Checking rows',
+  extracting_missing_ranks: 'Re-extracting missing rows',
+  extracting_missing_ranks_gemini3: 'Re-extracting missing rows (Gemini 3 Flash)',
   writing_db: 'Writing DB',
   moving_file: 'Moving file',
   exporting_csv: 'Exporting',
@@ -309,8 +312,8 @@ function JobItem({
             {job.entry_date ?? '—'}
           </span>
           {job.version_count > 1 ? (
-            <span className="rounded bg-zinc-800/70 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-zinc-200">
-              {job.version_count} versions
+            <span className="text-[10px] font-medium text-zinc-500">
+              · {job.version_count} versions
             </span>
           ) : null}
         </div>
@@ -323,6 +326,19 @@ function JobItem({
           {job.rows_appended_last_run != null ? (
             <span>· {job.rows_appended_last_run} rows</span>
           ) : null}
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onDoubleClick();
+            }}
+            onDoubleClick={(e) => e.stopPropagation()}
+            className="rounded border border-zinc-800 bg-zinc-900/40 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500 hover:border-zinc-600 hover:text-zinc-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-zinc-400"
+            aria-label="Open run details"
+            title="Open run details"
+          >
+            {job.run_count} {job.run_count === 1 ? 'run' : 'runs'}
+          </button>
         </div>
         <JobProgressBar job={job} avgDurationMs={avgDurationMs} />
       </div>

@@ -7,9 +7,11 @@ import type { Db } from './db.js';
 import { getConfig, withTransaction } from './db.js';
 import { exportCsv } from './csv.js';
 import { makeUniqueFilename } from './files.js';
-import { extractChartRows } from './gemini.js';
+import { extractChartRows, extractMissingChartRows } from './gemini.js';
 import type { FileLocation, Job } from './types.js';
 import { coerceRank } from './utils/coerceRank.js';
+import type { MissingChartGroup } from './utils/extractionCompleteness.js';
+import { findMissingChartGroups, formatRankRanges } from './utils/extractionCompleteness.js';
 import { parseEntryDate } from './utils/parseEntryDate.js';
 import type { SseHub } from './sse.js';
 
@@ -288,6 +290,16 @@ export class Worker {
     let runRecorded = false;
     let rawResultJson = '';
 
+    type AttemptLog = {
+      stage: 'initial' | 'missing_ranks' | 'missing_ranks_gemini3';
+      model: string;
+      rowsReturned: number;
+      rowsAdded: number;
+      missingAfter: Array<MissingChartGroup & { missingThisWeekRankRanges: string }>;
+    };
+
+    const attemptLogs: AttemptLog[] = [];
+
     let job = initialJob;
     const controller = new AbortController();
     this.activeControllers.set(job.id, controller);
@@ -340,11 +352,209 @@ export class Worker {
       this.throwIfCancelled(job.id, controller.signal);
       this.setProgress(job.id, 'extracting');
       const image = await fsp.readFile(filePath);
-      const extraction = await extractChartRows({ image, mimeType, model, abortSignal: controller.signal });
-      rawResultJson = extraction.rawResultJson;
-      const extractedRows = extraction.result.rows;
 
-      if (extractedRows.length === 0) {
+      let finalModel = model;
+      let runStatus: RunStatus = 'completed';
+      let runError: string | null = null;
+      const initialExtraction = await extractChartRows({ image, mimeType, model, abortSignal: controller.signal });
+      let mergedRows = initialExtraction.result.rows;
+
+      const chartGroupOrder: string[] = [];
+      {
+        const seen = new Set<string>();
+        for (const row of mergedRows) {
+          const key = `${row.chartSection}|||${row.chartTitle}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          chartGroupOrder.push(key);
+        }
+      }
+
+      const summarizeMissing = (groups: MissingChartGroup[]) =>
+        groups.map((g) => ({
+          ...g,
+          missingThisWeekRankRanges: formatRankRanges(g.missingThisWeekRanks, { maxRanges: 30 }),
+        }));
+
+      const mergeMissingRanks = (args: {
+        existing: typeof mergedRows;
+        incoming: typeof mergedRows;
+        missing: MissingChartGroup[];
+      }): { merged: typeof mergedRows; rowsAdded: number } => {
+        const missingByKey = new Map<string, Set<number>>();
+        for (const group of args.missing) {
+          const key = `${group.chartSection}|||${group.chartTitle}`;
+          missingByKey.set(key, new Set(group.missingThisWeekRanks));
+        }
+
+        const existingRanksByKey = new Map<string, Set<number>>();
+        for (const row of args.existing) {
+          const key = `${row.chartSection}|||${row.chartTitle}`;
+          const rank = coerceRank(row.thisWeekRank);
+          if (rank == null) continue;
+          let set = existingRanksByKey.get(key);
+          if (!set) {
+            set = new Set<number>();
+            existingRanksByKey.set(key, set);
+          }
+          set.add(rank);
+        }
+
+        const merged = args.existing.slice();
+        let rowsAdded = 0;
+
+        for (const row of args.incoming) {
+          const key = `${row.chartSection}|||${row.chartTitle}`;
+          const missingRanks = missingByKey.get(key);
+          if (!missingRanks || missingRanks.size === 0) continue;
+
+          const rank = coerceRank(row.thisWeekRank);
+          if (rank == null || !missingRanks.has(rank)) continue;
+
+          const existingRanks = existingRanksByKey.get(key) ?? new Set<number>();
+          if (existingRanks.has(rank)) continue;
+
+          merged.push(row);
+          existingRanks.add(rank);
+          existingRanksByKey.set(key, existingRanks);
+          rowsAdded += 1;
+        }
+
+        return { merged, rowsAdded };
+      };
+
+      const sortMergedRows = (rows: typeof mergedRows): typeof mergedRows => {
+        const orderIndex = new Map<string, number>();
+        for (const [index, key] of chartGroupOrder.entries()) orderIndex.set(key, index);
+
+        const groups = new Map<string, Array<{ row: (typeof mergedRows)[number]; rank: number | null; idx: number }>>();
+
+        for (const [idx, row] of rows.entries()) {
+          const key = `${row.chartSection}|||${row.chartTitle}`;
+          const rank = coerceRank(row.thisWeekRank);
+          let list = groups.get(key);
+          if (!list) {
+            list = [];
+            groups.set(key, list);
+          }
+          list.push({ row, rank, idx });
+        }
+
+        const keys = Array.from(groups.keys()).sort((a, b) => {
+          const ai = orderIndex.get(a) ?? Number.POSITIVE_INFINITY;
+          const bi = orderIndex.get(b) ?? Number.POSITIVE_INFINITY;
+          if (ai !== bi) return ai - bi;
+          return a.localeCompare(b);
+        });
+
+        const out: typeof mergedRows = [];
+        for (const key of keys) {
+          const list = groups.get(key);
+          if (!list) continue;
+          list.sort((a, b) => {
+            const ar = a.rank ?? Number.POSITIVE_INFINITY;
+            const br = b.rank ?? Number.POSITIVE_INFINITY;
+            if (ar !== br) return ar - br;
+            return a.idx - b.idx;
+          });
+          for (const item of list) out.push(item.row);
+        }
+
+        return out;
+      };
+
+      let missing = findMissingChartGroups({ rows: mergedRows, sourceFilename: job.filename });
+      attemptLogs.push({
+        stage: 'initial',
+        model,
+        rowsReturned: initialExtraction.result.rows.length,
+        rowsAdded: 0,
+        missingAfter: summarizeMissing(missing),
+      });
+
+      if (missing.length > 0) {
+        this.throwIfCancelled(job.id, controller.signal);
+        this.setProgress(job.id, 'validating_extraction');
+
+        this.throwIfCancelled(job.id, controller.signal);
+        this.setProgress(job.id, 'extracting_missing_ranks');
+        const missingExtraction = await extractMissingChartRows({
+          image,
+          mimeType,
+          model,
+          missing,
+          abortSignal: controller.signal,
+        });
+
+        const merged1 = mergeMissingRanks({ existing: mergedRows, incoming: missingExtraction.result.rows, missing });
+        mergedRows = merged1.merged;
+        missing = findMissingChartGroups({ rows: mergedRows, sourceFilename: job.filename });
+        attemptLogs.push({
+          stage: 'missing_ranks',
+          model,
+          rowsReturned: missingExtraction.result.rows.length,
+          rowsAdded: merged1.rowsAdded,
+          missingAfter: summarizeMissing(missing),
+        });
+
+        if (missing.length > 0 && model !== 'gemini-3-flash-preview') {
+          this.throwIfCancelled(job.id, controller.signal);
+          this.setProgress(job.id, 'extracting_missing_ranks_gemini3');
+
+          const gemini3Model = 'gemini-3-flash-preview';
+          const missingExtractionGemini3 = await extractMissingChartRows({
+            image,
+            mimeType,
+            model: gemini3Model,
+            missing,
+            abortSignal: controller.signal,
+          });
+
+          const merged2 = mergeMissingRanks({
+            existing: mergedRows,
+            incoming: missingExtractionGemini3.result.rows,
+            missing,
+          });
+          mergedRows = merged2.merged;
+          missing = findMissingChartGroups({ rows: mergedRows, sourceFilename: job.filename });
+          attemptLogs.push({
+            stage: 'missing_ranks_gemini3',
+            model: gemini3Model,
+            rowsReturned: missingExtractionGemini3.result.rows.length,
+            rowsAdded: merged2.rowsAdded,
+            missingAfter: summarizeMissing(missing),
+          });
+
+          finalModel = gemini3Model;
+        }
+
+        if (missing.length > 0) {
+          const preview = missing
+            .slice(0, 4)
+            .map(
+              (g) =>
+                `${g.chartTitle || '(unknown chart)'}: expected ${g.expectedRowCount}, got ${g.actualRowCount}, missing ranks ${formatRankRanges(g.missingThisWeekRanks)}`,
+            )
+            .join('; ');
+          runStatus = 'error';
+          runError = `Extraction incomplete: ${preview}${missing.length > 4 ? '…' : ''}`;
+        }
+      }
+
+      mergedRows = sortMergedRows(mergedRows);
+
+      rawResultJson = JSON.stringify(
+        {
+          object: { rows: mergedRows },
+          attempts: attemptLogs,
+          status: runStatus,
+          error: runError,
+        },
+        null,
+        2,
+      );
+
+      if (mergedRows.length === 0) {
         throw new Error('No rows extracted');
       }
 
@@ -375,11 +585,11 @@ export class Worker {
         this.db
           .prepare(
             `INSERT INTO runs (run_id, job_id, model, extracted_at, rows_inserted, raw_result_json, status, error)
-             VALUES (?, ?, ?, ?, ?, ?, 'completed', NULL)`,
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
           )
-          .run(runId, job.id, model, extractedAt, extractedRows.length, rawResultJson);
+          .run(runId, job.id, finalModel, extractedAt, mergedRows.length, rawResultJson, runStatus, runError);
 
-        for (const row of extractedRows) {
+        for (const row of mergedRows) {
           insert.run(
             runId,
             job.id,
@@ -399,6 +609,10 @@ export class Worker {
         }
       });
       runRecorded = true;
+
+      if (runStatus !== 'completed') {
+        throw new Error(runError || 'Extraction incomplete');
+      }
 
       let finalFilename = job.filename;
       let finalLocation: FileLocation = fileLocation;
@@ -429,13 +643,13 @@ export class Worker {
 
       this.throwIfCancelled(job.id, controller.signal);
       this.setProgress(job.id, 'exporting_csv');
-      this.setCompleted({
-        jobId: job.id,
-        runId,
-        rowsAppended: extractedRows.length,
-        filename: finalFilename,
-        fileLocation: finalLocation,
-      });
+        this.setCompleted({
+          jobId: job.id,
+          runId,
+          rowsAppended: mergedRows.length,
+          filename: finalFilename,
+          fileLocation: finalLocation,
+        });
       await this.enqueueCsvExport();
     } catch (error) {
       if (error instanceof JobCancelledError || controller.signal.aborted || isAbortError(error)) {
