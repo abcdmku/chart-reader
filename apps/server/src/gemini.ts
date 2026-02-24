@@ -144,7 +144,7 @@ export async function extractMissingChartRows(args: {
     .join('\n');
 
   const userPrompt = [
-    'You previously extracted chart table rows from this scanned Billboard page, but some rows were missed.',
+    'You previously extracted chart table rows from this scanned Billboard page, but some rows were missed. Base their location off of the ranks you can clearly read, and the chart titles/sections they belong to.',
     '',
     'Task: find the missing rows and output ONLY those missing rows.',
     '',
