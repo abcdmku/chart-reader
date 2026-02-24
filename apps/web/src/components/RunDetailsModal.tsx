@@ -19,6 +19,7 @@ export function RunDetailsModal({ jobId, onClose }: RunDetailsModalProps) {
   const [data, setData] = useState<JobRunDetailsResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
 
   useHotkeys('escape', onClose, { enabled: !!jobId });
 
@@ -27,6 +28,7 @@ export function RunDetailsModal({ jobId, onClose }: RunDetailsModalProps) {
       setData(null);
       setLoading(false);
       setError(null);
+      setSelectedRunId(null);
       return;
     }
 
@@ -34,6 +36,7 @@ export function RunDetailsModal({ jobId, onClose }: RunDetailsModalProps) {
     setLoading(true);
     setError(null);
     setData(null);
+    setSelectedRunId(null);
 
     void getJobRunDetails(jobId, controller.signal)
       .then((next) => setData(next))
@@ -48,15 +51,39 @@ export function RunDetailsModal({ jobId, onClose }: RunDetailsModalProps) {
     return () => controller.abort();
   }, [jobId]);
 
+  const runs = useMemo(() => (data?.runs?.length ? data.runs : data?.run ? [data.run] : []), [data]);
+
+  useEffect(() => {
+    if (!data) {
+      setSelectedRunId(null);
+      return;
+    }
+
+    const latestId = data.run?.run_id ?? runs[0]?.run_id ?? null;
+    setSelectedRunId((prev) => {
+      if (prev && runs.some((r) => r.run_id === prev)) return prev;
+      return latestId;
+    });
+  }, [data, runs]);
+
+  const selectedRun = useMemo(() => {
+    if (!data) return null;
+    if (selectedRunId) {
+      const found = runs.find((r) => r.run_id === selectedRunId);
+      if (found) return found;
+    }
+    return data.run ?? runs[0] ?? null;
+  }, [data, runs, selectedRunId]);
+
   const prettyRawJson = useMemo(() => {
-    const raw = data?.run?.raw_result_json;
+    const raw = selectedRun?.raw_result_json;
     if (!raw) return null;
     try {
       return JSON.stringify(JSON.parse(raw), null, 2);
     } catch {
       return raw;
     }
-  }, [data?.run?.raw_result_json]);
+  }, [selectedRun?.raw_result_json]);
 
   if (!jobId) return null;
 
@@ -75,7 +102,11 @@ export function RunDetailsModal({ jobId, onClose }: RunDetailsModalProps) {
         <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-3">
           <div>
             <div className="text-sm font-semibold text-zinc-100">Run Details</div>
-            <div className="text-xs text-zinc-500">{data?.job.filename ?? jobId}</div>
+            <div className="text-xs text-zinc-500">
+              {data?.job.canonical_filename ?? data?.job.filename ?? jobId}
+              {data?.job.version_count && data.job.version_count > 1 ? ` (${data.job.version_count} versions)` : ''}
+              {data?.job.pending_filename ? ' (pending upload)' : ''}
+            </div>
           </div>
           <button
             onClick={onClose}
@@ -101,6 +132,11 @@ export function RunDetailsModal({ jobId, onClose }: RunDetailsModalProps) {
                     <span className="text-zinc-500">Filename:</span> {data.job.filename}
                   </div>
                   <div>
+                    <span className="text-zinc-500">Original:</span> {data.job.canonical_filename}
+                    {data.job.version_count > 1 ? ` (${data.job.version_count} versions)` : ''}
+                    {data.job.pending_filename ? ' (pending upload)' : ''}
+                  </div>
+                  <div>
                     <span className="text-zinc-500">Status:</span> {data.job.status}
                   </div>
                   <div>
@@ -118,26 +154,70 @@ export function RunDetailsModal({ jobId, onClose }: RunDetailsModalProps) {
                 </div>
               </section>
 
-              {data.run ? (
+              {selectedRun ? (
                 <>
                   <section className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3">
                     <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500">
-                      Latest Run
+                      Run
                     </div>
                     <div className="grid grid-cols-1 gap-2 text-xs text-zinc-300 md:grid-cols-2">
                       <div>
                         <span className="text-zinc-500">Run ID:</span>{' '}
-                        <span className="font-mono">{data.run.run_id}</span>
+                        <span className="font-mono">{selectedRun.run_id}</span>
                       </div>
                       <div>
-                        <span className="text-zinc-500">Model:</span> {data.run.model}
+                        <span className="text-zinc-500">Model:</span> {selectedRun.model}
                       </div>
                       <div>
                         <span className="text-zinc-500">Extracted:</span>{' '}
-                        {formatIso(data.run.extracted_at)}
+                        {formatIso(selectedRun.extracted_at)}
                       </div>
                       <div>
-                        <span className="text-zinc-500">Rows Inserted:</span> {data.run.rows_inserted}
+                        <span className="text-zinc-500">Rows Inserted:</span> {selectedRun.rows_inserted}
+                      </div>
+                    </div>
+                  </section>
+
+                  <section className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3">
+                    <div className="mb-2 flex items-center justify-between gap-3">
+                      <div className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
+                        Run History
+                      </div>
+                      <div className="text-xs text-zinc-500">Showing {runs.length} most recent</div>
+                    </div>
+
+                    <div className="overflow-hidden rounded border border-zinc-800 bg-zinc-950">
+                      <div className="max-h-56 overflow-auto">
+                        {runs.map((run) => {
+                          const isSelected = run.run_id === selectedRunId;
+                          const isLatest = run.run_id === data.run?.run_id;
+                          return (
+                            <button
+                              key={run.run_id}
+                              type="button"
+                              onClick={() => setSelectedRunId(run.run_id)}
+                              className={`flex w-full items-start justify-between gap-3 border-b border-zinc-900 px-3 py-2 text-left text-xs hover:bg-zinc-900/50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-zinc-400 ${
+                                isSelected ? 'bg-zinc-900/60' : ''
+                              }`}
+                            >
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-2">
+                                  <span className="font-mono text-zinc-200">{run.run_id}</span>
+                                  {isLatest ? (
+                                    <span className="rounded bg-emerald-900/40 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-200">
+                                      latest
+                                    </span>
+                                  ) : null}
+                                </div>
+                                <div className="mt-1 text-zinc-500">{formatIso(run.extracted_at)}</div>
+                              </div>
+                              <div className="shrink-0 text-right">
+                                <div className="text-zinc-300">{run.model}</div>
+                                <div className="mt-1 text-zinc-500">{run.rows_inserted} rows</div>
+                              </div>
+                            </button>
+                          );
+                        })}
                       </div>
                     </div>
                   </section>

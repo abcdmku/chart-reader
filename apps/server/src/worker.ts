@@ -19,6 +19,17 @@ type WorkerPaths = {
   outputCsvPath: string;
 };
 
+class JobCancelledError extends Error {
+  constructor(message = 'Cancelled') {
+    super(message);
+    this.name = 'JobCancelledError';
+  }
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'AbortError';
+}
+
 async function fileExists(filePath: string): Promise<boolean> {
   try {
     await fsp.access(filePath);
@@ -45,6 +56,7 @@ async function moveFile(sourcePath: string, destPath: string): Promise<void> {
 export class Worker {
   private tickTimer: NodeJS.Timeout;
   private exportQueue: Promise<void> = Promise.resolve();
+  private readonly activeControllers = new Map<string, AbortController>();
 
   constructor(
     private readonly db: Db,
@@ -58,6 +70,13 @@ export class Worker {
 
   stop(): void {
     clearInterval(this.tickTimer);
+    for (const controller of this.activeControllers.values()) controller.abort();
+    this.activeControllers.clear();
+  }
+
+  requestCancel(jobId: string, message = 'Cancelled'): void {
+    const controller = this.activeControllers.get(jobId);
+    controller?.abort(message);
   }
 
   async tick(): Promise<void> {
@@ -67,7 +86,8 @@ export class Worker {
     const activeCountRow = this.db
       .prepare("SELECT COUNT(*) AS count FROM jobs WHERE status = 'processing'")
       .get() as { count: number };
-    const activeCount = activeCountRow.count ?? 0;
+    const activeCountDb = activeCountRow.count ?? 0;
+    const activeCount = Math.max(activeCountDb, this.activeControllers.size);
 
     const available = Math.max(0, config.concurrency - activeCount);
     if (available === 0) return;
@@ -119,7 +139,7 @@ export class Worker {
   }
 
   private setProgress(jobId: string, step: string): void {
-    this.db.prepare('UPDATE jobs SET progress_step = ? WHERE id = ?').run(step, jobId);
+    this.db.prepare("UPDATE jobs SET progress_step = ? WHERE id = ? AND status = 'processing'").run(step, jobId);
     this.updateJob(jobId);
   }
 
@@ -130,6 +150,21 @@ export class Worker {
         `UPDATE jobs
          SET status = 'error',
              progress_step = 'error',
+             error = ?,
+             finished_at = ?
+         WHERE id = ? AND status = 'processing'`,
+      )
+      .run(message, now, jobId);
+    this.updateJob(jobId);
+  }
+
+  private setCancelled(jobId: string, message: string): void {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `UPDATE jobs
+         SET status = 'cancelled',
+             progress_step = NULL,
              error = ?,
              finished_at = ?
          WHERE id = ?`,
@@ -152,10 +187,25 @@ export class Worker {
              rows_appended_last_run = ?,
              filename = ?,
              file_location = ?
-         WHERE id = ?`,
+         WHERE id = ? AND status = 'processing'`,
       )
       .run(now, args.runId, args.rowsAppended, args.filename, args.fileLocation, args.jobId);
     this.updateJob(args.jobId);
+  }
+
+  private getJobStatus(jobId: string): Job['status'] | null {
+    const row = this.db.prepare('SELECT status FROM jobs WHERE id = ?').get(jobId) as { status?: Job['status'] } | undefined;
+    return row?.status ?? null;
+  }
+
+  private throwIfCancelled(jobId: string, signal: AbortSignal): void {
+    if (signal.aborted) {
+      const reason = signal.reason;
+      const message = typeof reason === 'string' && reason.trim() ? reason : 'Cancelled';
+      throw new JobCancelledError(message);
+    }
+    const status = this.getJobStatus(jobId);
+    if (status === 'cancelled') throw new JobCancelledError('Cancelled');
   }
 
   private enqueueCsvExport(): Promise<void> {
@@ -171,6 +221,35 @@ export class Worker {
     return this.exportQueue;
   }
 
+  private queuePendingVersionIfNeeded(jobId: string): void {
+    const row = this.db.prepare('SELECT status, pending_filename FROM jobs WHERE id = ?').get(jobId) as
+      | { status: Job['status']; pending_filename: string | null }
+      | undefined;
+    const pending = row?.pending_filename ?? null;
+    if (!pending) return;
+    if (row?.status === 'processing' || row?.status === 'deleted') return;
+
+    const inNew = fs.existsSync(path.join(this.paths.newDir, pending));
+    const inCompleted = fs.existsSync(path.join(this.paths.completedDir, pending));
+    const fileLocation: FileLocation = inNew ? 'new' : inCompleted ? 'completed' : 'missing';
+
+    this.db
+      .prepare(
+        `UPDATE jobs
+         SET status = 'queued',
+             progress_step = NULL,
+             error = NULL,
+             started_at = NULL,
+             finished_at = NULL,
+             filename = ?,
+             file_location = ?,
+             pending_filename = NULL
+         WHERE id = ? AND status <> 'processing'`,
+      )
+      .run(pending, fileLocation, jobId);
+    this.updateJob(jobId);
+  }
+
   private async processJob(initialJob: Job, model: string): Promise<void> {
     const apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY?.trim();
     if (!apiKey) {
@@ -180,8 +259,11 @@ export class Worker {
     }
 
     let job = initialJob;
+    const controller = new AbortController();
+    this.activeControllers.set(job.id, controller);
 
     try {
+      this.throwIfCancelled(job.id, controller.signal);
       this.setProgress(job.id, 'validating_file');
 
       const pathNew = path.join(this.paths.newDir, job.filename);
@@ -226,9 +308,10 @@ export class Worker {
         return;
       }
 
+      this.throwIfCancelled(job.id, controller.signal);
       this.setProgress(job.id, 'extracting');
       const image = await fsp.readFile(filePath);
-      const extraction = await extractChartRows({ image, mimeType, model });
+      const extraction = await extractChartRows({ image, mimeType, model, abortSignal: controller.signal });
       const extractedRows = extraction.result.rows;
 
       if (extractedRows.length === 0) {
@@ -237,6 +320,7 @@ export class Worker {
         return;
       }
 
+      this.throwIfCancelled(job.id, controller.signal);
       this.setProgress(job.id, 'writing_db');
       const runId = nanoid();
       const extractedAt = new Date().toISOString();
@@ -292,6 +376,7 @@ export class Worker {
       let finalLocation: FileLocation = fileLocation;
 
       if (fileLocation === 'new') {
+        this.throwIfCancelled(job.id, controller.signal);
         this.setProgress(job.id, 'moving_file');
 
         const isTaken = (name: string) => {
@@ -314,6 +399,7 @@ export class Worker {
         }
       }
 
+      this.throwIfCancelled(job.id, controller.signal);
       this.setProgress(job.id, 'exporting_csv');
       this.setCompleted({
         jobId: job.id,
@@ -324,8 +410,15 @@ export class Worker {
       });
       await this.enqueueCsvExport();
     } catch (error) {
-      this.setError(job.id, (error as Error).message);
+      if (error instanceof JobCancelledError || controller.signal.aborted || isAbortError(error)) {
+        const message = error instanceof Error ? error.message : 'Cancelled';
+        this.setCancelled(job.id, message || 'Cancelled');
+      } else {
+        this.setError(job.id, (error as Error).message);
+      }
     } finally {
+      this.activeControllers.delete(job.id);
+      this.queuePendingVersionIfNeeded(job.id);
       await this.tick();
     }
   }

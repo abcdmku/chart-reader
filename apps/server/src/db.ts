@@ -1,4 +1,5 @@
 import { createRequire } from 'node:module';
+import path from 'node:path';
 import type { Config, Job } from './types.js';
 
 export type Statement = {
@@ -47,6 +48,7 @@ export function migrate(db: Db): void {
     CREATE TABLE IF NOT EXISTS jobs (
       id TEXT PRIMARY KEY,
       filename TEXT NOT NULL UNIQUE,
+      canonical_filename TEXT NOT NULL,
       entry_date TEXT NULL,
       status TEXT NOT NULL,
       progress_step TEXT NULL,
@@ -57,7 +59,9 @@ export function migrate(db: Db): void {
       run_count INTEGER NOT NULL DEFAULT 0,
       last_run_id TEXT NULL,
       rows_appended_last_run INTEGER NULL,
-      file_location TEXT NOT NULL
+      file_location TEXT NOT NULL,
+      version_count INTEGER NOT NULL DEFAULT 1,
+      pending_filename TEXT NULL
     );
 
     CREATE TABLE IF NOT EXISTS runs (
@@ -98,6 +102,181 @@ export function migrate(db: Db): void {
      VALUES (1, 2, 0, ?)
      ON CONFLICT(id) DO NOTHING`,
   ).run(defaultModel);
+
+  migrateJobsTable(db);
+}
+
+type TableInfoRow = { name: string };
+
+function getTableColumnNames(db: Db, tableName: string): Set<string> {
+  const rows = db.prepare(`PRAGMA table_info(${tableName})`).all() as TableInfoRow[];
+  return new Set(rows.map((r) => r.name));
+}
+
+function removeTrailingNumberSuffix(filename: string): string | null {
+  const ext = path.extname(filename);
+  const base = ext ? filename.slice(0, -ext.length) : filename;
+  const match = base.match(/^(.*)_([0-9]+)$/);
+  if (!match) return null;
+  return `${match[1]}${ext}`;
+}
+
+function migrateJobsTable(db: Db): void {
+  const columns = getTableColumnNames(db, 'jobs');
+
+  if (!columns.has('canonical_filename')) {
+    db.exec(`ALTER TABLE jobs ADD COLUMN canonical_filename TEXT NOT NULL DEFAULT '';`);
+  }
+  if (!columns.has('version_count')) {
+    db.exec(`ALTER TABLE jobs ADD COLUMN version_count INTEGER NOT NULL DEFAULT 1;`);
+  }
+  if (!columns.has('pending_filename')) {
+    db.exec(`ALTER TABLE jobs ADD COLUMN pending_filename TEXT NULL;`);
+  }
+
+  db.exec('CREATE INDEX IF NOT EXISTS idx_jobs_canonical_filename ON jobs(canonical_filename);');
+
+  backfillCanonicalFilenames(db);
+  mergeDuplicateJobs(db);
+}
+
+function backfillCanonicalFilenames(db: Db): void {
+  type JobRow = { id: string; filename: string; created_at: string; canonical_filename: string | null };
+  const jobs = db
+    .prepare('SELECT id, filename, created_at, canonical_filename FROM jobs ORDER BY created_at ASC')
+    .all() as JobRow[];
+
+  const canonicalByFilename = new Map<string, string>();
+
+  const update = db.prepare('UPDATE jobs SET canonical_filename = ? WHERE id = ?');
+
+  for (const job of jobs) {
+    const current = (job.canonical_filename ?? '').trim();
+    if (current) {
+      canonicalByFilename.set(job.filename, current);
+      continue;
+    }
+
+    const baseCandidate = removeTrailingNumberSuffix(job.filename);
+    const inferred = baseCandidate && canonicalByFilename.has(baseCandidate) ? canonicalByFilename.get(baseCandidate)! : job.filename;
+    update.run(inferred, job.id);
+    canonicalByFilename.set(job.filename, inferred);
+  }
+}
+
+function mergeDuplicateJobs(db: Db): void {
+  type GroupRow = { canonical_filename: string; cnt: number };
+  const groups = db
+    .prepare(
+      `SELECT canonical_filename, COUNT(*) AS cnt
+       FROM jobs
+       WHERE canonical_filename <> ''
+       GROUP BY canonical_filename
+       HAVING cnt > 1`,
+    )
+    .all() as GroupRow[];
+
+  if (groups.length === 0) return;
+
+  withTransaction(db, () => {
+    const selectJobs = db.prepare(
+      `SELECT
+         j.*,
+         r.extracted_at AS last_extracted_at
+       FROM jobs AS j
+       LEFT JOIN runs AS r
+         ON r.run_id = j.last_run_id
+       WHERE j.canonical_filename = ?
+       ORDER BY j.created_at ASC`,
+    );
+
+    const updateRunsJob = db.prepare('UPDATE runs SET job_id = ? WHERE job_id = ?');
+    const updateChartRowsJob = db.prepare('UPDATE chart_rows SET job_id = ? WHERE job_id = ?');
+    const deleteJob = db.prepare('DELETE FROM jobs WHERE id = ?');
+
+    const selectLatestRun = db.prepare(
+      `SELECT run_id, extracted_at, rows_inserted
+       FROM runs
+       WHERE job_id = ?
+       ORDER BY extracted_at DESC
+       LIMIT 1`,
+    );
+    const selectRunCount = db.prepare('SELECT COUNT(*) AS cnt FROM runs WHERE job_id = ?');
+    const selectSourceFileForRun = db.prepare('SELECT source_file FROM chart_rows WHERE run_id = ? LIMIT 1');
+
+    for (const group of groups) {
+      const rows = selectJobs.all(group.canonical_filename) as Array<
+        Job & { canonical_filename: string; version_count: number; pending_filename: string | null; last_extracted_at: string | null }
+      >;
+      if (rows.length < 2) continue;
+
+      const primary = rows[0];
+
+      const latestJob = rows
+        .slice()
+        .sort((a, b) => {
+          const aMissing = a.last_extracted_at == null ? 1 : 0;
+          const bMissing = b.last_extracted_at == null ? 1 : 0;
+          if (aMissing !== bMissing) return aMissing - bMissing;
+          if (a.last_extracted_at !== b.last_extracted_at) return (b.last_extracted_at ?? '').localeCompare(a.last_extracted_at ?? '');
+          return b.created_at.localeCompare(a.created_at);
+        })[0];
+
+      let pendingFilename: string | null = null;
+      for (const row of rows) {
+        if (row.pending_filename && !pendingFilename) pendingFilename = row.pending_filename;
+      }
+
+      for (const row of rows.slice(1)) {
+        updateRunsJob.run(primary.id, row.id);
+        updateChartRowsJob.run(primary.id, row.id);
+        deleteJob.run(row.id);
+      }
+
+      const lastRun = selectLatestRun.get(primary.id) as
+        | { run_id: string; extracted_at: string; rows_inserted: number }
+        | undefined;
+      const runCount = (selectRunCount.get(primary.id) as { cnt: number } | undefined)?.cnt ?? 0;
+      const sourceFile = lastRun ? ((selectSourceFileForRun.get(lastRun.run_id) as { source_file: string } | undefined)?.source_file ?? null) : null;
+
+      db.prepare(
+        `UPDATE jobs
+         SET filename = ?,
+             canonical_filename = ?,
+             entry_date = ?,
+             status = ?,
+             progress_step = ?,
+             error = ?,
+             created_at = ?,
+             started_at = ?,
+             finished_at = ?,
+             run_count = ?,
+             last_run_id = ?,
+             rows_appended_last_run = ?,
+             file_location = ?,
+             version_count = ?,
+             pending_filename = ?
+         WHERE id = ?`,
+      ).run(
+        sourceFile ?? latestJob.filename,
+        latestJob.canonical_filename,
+        latestJob.entry_date,
+        latestJob.status,
+        latestJob.progress_step,
+        latestJob.error,
+        primary.created_at,
+        latestJob.started_at,
+        latestJob.finished_at,
+        runCount,
+        lastRun?.run_id ?? null,
+        lastRun?.rows_inserted ?? null,
+        latestJob.file_location,
+        rows.length,
+        pendingFilename,
+        primary.id,
+      );
+    }
+  });
 }
 
 export function withTransaction<T>(db: Db, fn: () => T): T {

@@ -12,6 +12,7 @@ export const jobs = sqliteTable(
   {
     id: text('id').primaryKey(),
     filename: text('filename').notNull(),
+    canonicalFilename: text('canonical_filename').notNull(),
     entryDate: text('entry_date'),
     status: text('status').notNull(),
     progressStep: text('progress_step'),
@@ -23,9 +24,12 @@ export const jobs = sqliteTable(
     lastRunId: text('last_run_id'),
     rowsAppendedLastRun: integer('rows_appended_last_run'),
     fileLocation: text('file_location').notNull(),
+    versionCount: integer('version_count').notNull().default(1),
+    pendingFilename: text('pending_filename'),
   },
   (table) => ({
     idxJobsStatusCreated: index('idx_jobs_status_created').on(table.status, table.createdAt),
+    idxJobsCanonicalFilename: index('idx_jobs_canonical_filename').on(table.canonicalFilename),
   }),
 );
 

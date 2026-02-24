@@ -47,6 +47,11 @@ export async function rerunJob(jobId: string): Promise<void> {
   if (!response.ok) throw new Error('Failed to rerun job');
 }
 
+export async function stopJob(jobId: string): Promise<void> {
+  const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/stop`, { method: 'POST' });
+  if (!response.ok) throw new Error('Failed to stop job');
+}
+
 export async function getJobRunDetails(jobId: string, signal?: AbortSignal): Promise<JobRunDetailsResponse> {
   const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/run`, { signal });
   if (!response.ok) throw new Error('Failed to fetch run details');

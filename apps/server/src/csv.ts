@@ -52,24 +52,51 @@ export async function exportCsv(db: Db, outputCsvPath: string): Promise<{ update
   const rows = db
     .prepare(
       `SELECT
-        cr.entry_date,
-        cr.chart_title,
-        cr.chart_section,
-        cr.this_week_rank,
-        cr.last_week_rank,
-        cr.two_weeks_ago_rank,
-        cr.weeks_on_chart,
-        cr.title,
-        cr.artist,
-        cr.label,
-        cr.source_file,
-        cr.run_id,
-        cr.extracted_at
-      FROM chart_rows AS cr
-      INNER JOIN jobs AS j
-        ON j.id = cr.job_id
-       AND j.last_run_id = cr.run_id
-      ORDER BY cr.id ASC`,
+         cr.entry_date,
+         cr.chart_title,
+         cr.chart_section,
+         cr.this_week_rank,
+         cr.last_week_rank,
+         cr.two_weeks_ago_rank,
+         cr.weeks_on_chart,
+         cr.title,
+         cr.artist,
+         cr.label,
+         cr.source_file,
+         cr.run_id,
+         cr.extracted_at
+       FROM chart_rows AS cr
+       INNER JOIN (
+         WITH latest AS (
+           SELECT j.canonical_filename AS canonical_filename, MAX(r.extracted_at) AS max_extracted_at
+           FROM jobs AS j
+           INNER JOIN runs AS r
+             ON r.run_id = j.last_run_id
+           WHERE j.last_run_id IS NOT NULL
+           GROUP BY j.canonical_filename
+         ),
+         chosen AS (
+           SELECT j.id AS job_id, j.last_run_id AS run_id
+           FROM jobs AS j
+           INNER JOIN runs AS r
+             ON r.run_id = j.last_run_id
+           INNER JOIN latest AS l
+             ON l.canonical_filename = j.canonical_filename
+            AND l.max_extracted_at = r.extracted_at
+           WHERE j.created_at = (
+             SELECT MAX(j2.created_at)
+             FROM jobs AS j2
+             INNER JOIN runs AS r2
+               ON r2.run_id = j2.last_run_id
+             WHERE j2.canonical_filename = j.canonical_filename
+               AND r2.extracted_at = l.max_extracted_at
+           )
+         )
+         SELECT job_id, run_id FROM chosen
+       ) AS latest_run
+         ON latest_run.job_id = cr.job_id
+        AND latest_run.run_id = cr.run_id
+       ORDER BY cr.id ASC`,
     )
     .all() as CsvRow[];
 

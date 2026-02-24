@@ -24,6 +24,7 @@ export async function extractChartRows(args: {
   image: Buffer;
   mimeType: string;
   model: string;
+  abortSignal?: AbortSignal;
 }): Promise<{ result: ExtractionResult; rawResultJson: string }> {
   const systemPrompt = [
     'You are a high-precision OCR + table extraction engine for scanned Billboard chart pages.',
@@ -74,6 +75,7 @@ export async function extractChartRows(args: {
       name: 'billboard_chart_rows',
       description: 'Extracted chart rows from scanned Billboard chart tables.',
     }),
+    abortSignal: args.abortSignal,
     temperature: 0,
     messages: [
       { role: 'system', content: systemPrompt },

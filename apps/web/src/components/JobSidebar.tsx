@@ -10,6 +10,8 @@ function statusDotClass(status: JobStatus): string {
       return 'bg-blue-500 animate-pulse';
     case 'error':
       return 'bg-red-500';
+    case 'cancelled':
+      return 'bg-amber-500';
     default:
       return 'bg-zinc-600';
   }
@@ -130,7 +132,7 @@ export function JobSidebar({
   onOpenRunDetails,
   onImageClick,
 }: JobSidebarProps) {
-  const { config, jobs, avgDurationMs, rowsState, onTogglePause, onRerun, onDelete } = state;
+  const { config, jobs, avgDurationMs, rowsState, onTogglePause, onRerun, onStop, onDelete } = state;
 
   const sortedJobs = useMemo(
     () => jobs.slice().sort((a, b) => b.created_at.localeCompare(a.created_at)),
@@ -191,6 +193,7 @@ export function JobSidebar({
                 if (job.file_location !== 'missing') onImageClick(job.filename);
               }}
               onRerun={() => void onRerun(job.id)}
+              onStop={() => void onStop(job.id)}
               onDelete={() => void onDelete(job.id)}
             />
           ))
@@ -221,6 +224,7 @@ function JobItem({
   onDoubleClick,
   onImageClick,
   onRerun,
+  onStop,
   onDelete,
 }: {
   job: Job;
@@ -230,9 +234,13 @@ function JobItem({
   onDoubleClick: () => void;
   onImageClick: () => void;
   onRerun: () => void;
+  onStop: () => void;
   onDelete: () => void;
 }) {
-  const busy = job.status === 'processing' || job.status === 'deleted';
+  const disableRerun = job.status === 'processing' || job.status === 'deleted';
+  const disableDelete = job.status === 'processing' || job.status === 'deleted';
+  const showStop = job.status === 'processing';
+  const displayFilename = job.canonical_filename || job.filename;
 
   return (
     <div
@@ -301,11 +309,13 @@ function JobItem({
             {job.entry_date ?? '—'}
           </span>
         </div>
-        <div className="mt-0.5 truncate text-xs text-zinc-500" title={chartLabel(job.filename)}>
-          {chartLabel(job.filename)}
+        <div className="mt-0.5 truncate text-xs text-zinc-500" title={chartLabel(displayFilename)}>
+          {chartLabel(displayFilename)}
         </div>
         <div className="mt-0.5 flex items-center gap-2 text-xs text-zinc-600">
           <span>{job.status}</span>
+          {job.version_count > 1 ? <span>Â· {job.version_count} versions</span> : null}
+          {job.pending_filename ? <span>Â· pending upload</span> : null}
           {job.rows_appended_last_run != null ? (
             <span>· {job.rows_appended_last_run} rows</span>
           ) : null}
@@ -315,26 +325,41 @@ function JobItem({
 
       {/* Actions */}
       <div className="flex shrink-0 flex-col gap-0.5">
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            onRerun();
-          }}
-          onDoubleClick={(e) => e.stopPropagation()}
-          disabled={busy}
-          className="rounded px-1.5 py-0.5 text-xs text-zinc-600 hover:text-zinc-300 disabled:opacity-20 focus-visible:outline focus-visible:outline-2 focus-visible:outline-zinc-400"
-          aria-label="Rerun"
-          title="Rerun"
-        >
-          ↺
-        </button>
+        {showStop ? (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onStop();
+            }}
+            onDoubleClick={(e) => e.stopPropagation()}
+            className="rounded px-1.5 py-0.5 text-xs text-zinc-500 hover:text-amber-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-zinc-400"
+            aria-label="Stop"
+            title="Stop"
+          >
+            ⏹
+          </button>
+        ) : (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onRerun();
+            }}
+            onDoubleClick={(e) => e.stopPropagation()}
+            disabled={disableRerun}
+            className="rounded px-1.5 py-0.5 text-xs text-zinc-600 hover:text-zinc-300 disabled:opacity-20 focus-visible:outline focus-visible:outline-2 focus-visible:outline-zinc-400"
+            aria-label="Rerun"
+            title="Rerun"
+          >
+            ↺
+          </button>
+        )}
         <button
           onClick={(e) => {
             e.stopPropagation();
             onDelete();
           }}
           onDoubleClick={(e) => e.stopPropagation()}
-          disabled={busy}
+          disabled={disableDelete}
           className="rounded px-1.5 py-0.5 text-xs text-zinc-700 hover:text-red-400 disabled:opacity-20 focus-visible:outline focus-visible:outline-2 focus-visible:outline-zinc-400"
           aria-label="Delete"
           title="Delete"

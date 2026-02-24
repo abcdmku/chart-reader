@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { deleteJob, getRows, getState, rerunJob, scan, updateConfig, uploadFiles } from './api';
+import { deleteJob, getRows, getState, rerunJob, scan, stopJob, updateConfig, uploadFiles } from './api';
 import type { Config, Job, RowsResponse } from './types';
 
 function isAbortError(error: unknown): boolean {
@@ -34,6 +34,7 @@ export type AppState = {
   onTogglePause: () => Promise<void>;
   onUpload: () => Promise<void>;
   onRerun: (jobId: string) => Promise<void>;
+  onStop: (jobId: string) => Promise<void>;
   onDelete: (jobId: string) => Promise<void>;
 };
 
@@ -220,6 +221,16 @@ export function useAppState(): AppState {
     }
   }, []);
 
+  const onStop = useCallback(async (jobId: string) => {
+    if (!window.confirm('Stop this run?')) return;
+    try {
+      setError(null);
+      await stopJob(jobId);
+    } catch (e: unknown) {
+      setError((e as Error).message);
+    }
+  }, []);
+
   const onDelete = useCallback(async (jobId: string) => {
     if (!window.confirm('Delete this job? CSV data will remain.')) return;
     try {
@@ -245,6 +256,7 @@ export function useAppState(): AppState {
     onTogglePause,
     onUpload,
     onRerun,
+    onStop,
     onDelete,
   };
 }

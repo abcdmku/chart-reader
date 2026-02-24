@@ -173,8 +173,8 @@ export function Dashboard({ state }: { state: AppState }) {
               }}
               className="w-12 rounded border border-zinc-800 bg-zinc-950 px-2 py-1 text-xs text-zinc-100 outline-none focus-visible:border-zinc-600"
             />
-            <label className="text-xs text-zinc-600" htmlFor="dash-model">
-              model
+            <label className="sr-only" htmlFor="dash-model">
+              Model
             </label>
             <select
               id="dash-model"

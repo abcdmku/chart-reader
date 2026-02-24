@@ -4,12 +4,13 @@ export type Config = {
   model: string;
 };
 
-export type JobStatus = 'queued' | 'processing' | 'completed' | 'error' | 'deleted';
+export type JobStatus = 'queued' | 'processing' | 'completed' | 'error' | 'cancelled' | 'deleted';
 export type FileLocation = 'new' | 'completed' | 'missing';
 
 export type Job = {
   id: string;
   filename: string;
+  canonical_filename: string;
   entry_date: string | null;
   status: JobStatus;
   progress_step: string | null;
@@ -21,6 +22,8 @@ export type Job = {
   last_run_id: string | null;
   rows_appended_last_run: number | null;
   file_location: FileLocation;
+  version_count: number;
+  pending_filename: string | null;
 };
 
 export type Run = {
@@ -41,6 +44,7 @@ export type StateResponse = {
 export type JobRunDetailsResponse = {
   job: Job;
   run: Run | null;
+  runs: Run[];
 };
 
 export type ChartRow = {

@@ -7,7 +7,7 @@ import multer from 'multer';
 import { nanoid } from 'nanoid';
 import { exportCsv } from './csv.js';
 import { getConfig, listJobs, openDb, updateConfig } from './db.js';
-import { isSupportedImageFile, listSupportedImages, makeUniqueFilename } from './files.js';
+import { isSupportedImageFile, listSupportedImages, makeUniqueFilename, sanitizeFilename } from './files.js';
 import { ensureDirectories, getPaths } from './paths.js';
 import { SseHub } from './sse.js';
 import type { Config, Job } from './types.js';
@@ -142,12 +142,19 @@ app.post('/api/config', (req, res) => {
 
 app.post('/api/scan', async (_req, res) => {
   const filenames = await listSupportedImages(paths.newDir);
+  const pending = new Set(
+    (db.prepare('SELECT pending_filename FROM jobs WHERE pending_filename IS NOT NULL').all() as Array<{
+      pending_filename: string;
+    }>).map((r) => r.pending_filename),
+  );
+  const scanFilenames = filenames.filter((name) => !pending.has(name));
   const createdJobs: Job[] = [];
 
   const insert = db.prepare(
     `INSERT INTO jobs (
       id,
       filename,
+      canonical_filename,
       entry_date,
       status,
       progress_step,
@@ -158,12 +165,14 @@ app.post('/api/scan', async (_req, res) => {
       run_count,
       last_run_id,
       rows_appended_last_run,
-      file_location
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, 0, NULL, NULL, 'new')
+      file_location,
+      version_count,
+      pending_filename
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, 0, NULL, NULL, 'new', 1, NULL)
     ON CONFLICT(filename) DO NOTHING`,
   );
 
-  for (const filename of filenames) {
+  for (const filename of scanFilenames) {
     const id = nanoid();
     const now = new Date().toISOString();
     const entryDate = parseEntryDate(filename);
@@ -173,7 +182,7 @@ app.post('/api/scan', async (_req, res) => {
     const error = entryDate ? null : 'Date not found in filename (expected YYYY-MM-DD)';
     const finishedAt = entryDate ? null : now;
 
-    const result = insert.run(id, filename, entryDate, status, progressStep, error, now, finishedAt);
+    const result = insert.run(id, filename, filename, entryDate, status, progressStep, error, now, finishedAt);
     if (result.changes > 0) {
       const job = db.prepare('SELECT * FROM jobs WHERE id = ?').get(id) as Job;
       createdJobs.push(job);
@@ -186,7 +195,7 @@ app.post('/api/scan', async (_req, res) => {
   res.json({ created: createdJobs.length });
 });
 
-app.post('/api/upload', upload.array('files'), (req, res) => {
+app.post('/api/upload', upload.array('files'), async (req, res) => {
   const files = (req.files ?? []) as Express.Multer.File[];
   const createdJobs: Job[] = [];
 
@@ -194,6 +203,7 @@ app.post('/api/upload', upload.array('files'), (req, res) => {
     `INSERT INTO jobs (
       id,
       filename,
+      canonical_filename,
       entry_date,
       status,
       progress_step,
@@ -204,22 +214,81 @@ app.post('/api/upload', upload.array('files'), (req, res) => {
       run_count,
       last_run_id,
       rows_appended_last_run,
-      file_location
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, 0, NULL, NULL, 'new')
+      file_location,
+      version_count,
+      pending_filename
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, 0, NULL, NULL, 'new', 1, NULL)
     ON CONFLICT(filename) DO NOTHING`,
   );
 
   for (const file of files) {
     const id = nanoid();
     const now = new Date().toISOString();
-    const entryDate = parseEntryDate(file.filename);
+    const canonicalFilename = sanitizeFilename(file.originalname);
+    const entryDate = parseEntryDate(canonicalFilename) ?? parseEntryDate(file.filename);
+
+    const existing = db
+      .prepare('SELECT * FROM jobs WHERE canonical_filename = ? ORDER BY created_at ASC LIMIT 1')
+      .get(canonicalFilename) as Job | undefined;
 
     const status = entryDate ? 'queued' : 'error';
     const progressStep = entryDate ? null : 'error';
     const error = entryDate ? null : 'Date not found in filename (expected YYYY-MM-DD)';
     const finishedAt = entryDate ? null : now;
 
-    const result = insert.run(id, file.filename, entryDate, status, progressStep, error, now, finishedAt);
+    if (existing) {
+      const srcPath = path.join(paths.newDir, file.filename);
+
+      if (existing.status === 'processing') {
+        const isTakenInCompleted = (name: string) => fs.existsSync(path.join(paths.completedDir, name));
+        let pendingName = makeUniqueFilename(file.filename, isTakenInCompleted);
+        const destPath = path.join(paths.completedDir, pendingName);
+        try {
+          await fsp.rename(srcPath, destPath);
+        } catch (e) {
+          // Best-effort move; if it fails, keep in newDir (scan may create a job, but we still record pending filename).
+          // eslint-disable-next-line no-console
+          console.warn('Failed to move pending duplicate upload:', (e as Error).message);
+          pendingName = file.filename;
+        }
+
+        db.prepare('UPDATE jobs SET version_count = version_count + 1, pending_filename = ? WHERE id = ?').run(
+          pendingName,
+          existing.id,
+        );
+        const updated = db.prepare('SELECT * FROM jobs WHERE id = ?').get(existing.id) as Job;
+        sse.send('job', updated);
+        continue;
+      }
+
+      const priorFilename = existing.filename;
+      db.prepare(
+        `UPDATE jobs
+         SET status = ?,
+             progress_step = ?,
+             error = ?,
+             started_at = NULL,
+             finished_at = ?,
+             filename = ?,
+             canonical_filename = ?,
+             entry_date = ?,
+             file_location = 'new',
+             version_count = version_count + 1,
+             pending_filename = NULL
+         WHERE id = ?`,
+      ).run(status, progressStep, error, finishedAt, file.filename, canonicalFilename, entryDate, existing.id);
+
+      const updated = db.prepare('SELECT * FROM jobs WHERE id = ?').get(existing.id) as Job;
+      sse.send('job', updated);
+
+      // Best-effort cleanup: if we replaced a queued file, remove the old unreferenced upload from newDir.
+      if (priorFilename !== updated.filename) {
+        await fsp.rm(path.join(paths.newDir, priorFilename), { force: true }).catch(() => {});
+      }
+      continue;
+    }
+
+    const result = insert.run(id, file.filename, canonicalFilename, entryDate, status, progressStep, error, now, finishedAt);
     if (result.changes > 0) {
       const job = db.prepare('SELECT * FROM jobs WHERE id = ?').get(id) as Job;
       createdJobs.push(job);
@@ -264,6 +333,42 @@ app.post('/api/jobs/:id/rerun', (req, res) => {
   res.json({ ok: true });
 });
 
+app.post('/api/jobs/:id/stop', (req, res) => {
+  const jobId = req.params.id;
+  const job = db.prepare('SELECT * FROM jobs WHERE id = ?').get(jobId) as Job | undefined;
+  if (!job) {
+    res.status(404).json({ error: 'job not found' });
+    return;
+  }
+  if (job.status !== 'processing') {
+    res.status(409).json({ error: 'job is not processing' });
+    return;
+  }
+
+  const now = new Date().toISOString();
+  const result = db
+    .prepare(
+      `UPDATE jobs
+       SET status = 'cancelled',
+           progress_step = NULL,
+           error = 'Cancelled',
+           finished_at = ?
+       WHERE id = ? AND status = 'processing'`,
+    )
+    .run(now, jobId);
+
+  if (result.changes === 0) {
+    res.status(409).json({ error: 'job is not processing' });
+    return;
+  }
+
+  worker.requestCancel(jobId, 'Cancelled');
+
+  const updated = db.prepare('SELECT * FROM jobs WHERE id = ?').get(jobId) as Job;
+  sse.send('job', updated);
+  res.json({ ok: true });
+});
+
 app.get('/api/jobs/:id/run', (req, res) => {
   const jobId = req.params.id;
   const job = db.prepare('SELECT * FROM jobs WHERE id = ?').get(jobId) as Job | undefined;
@@ -281,6 +386,10 @@ app.get('/api/jobs/:id/run', (req, res) => {
     raw_result_json: string;
   };
 
+  const runs = db
+    .prepare('SELECT * FROM runs WHERE job_id = ? ORDER BY extracted_at DESC LIMIT ?')
+    .all(jobId, 10) as RunRow[];
+
   let run: RunRow | undefined;
   if (job.last_run_id) {
     run = db.prepare('SELECT * FROM runs WHERE run_id = ?').get(job.last_run_id) as RunRow | undefined;
@@ -291,7 +400,7 @@ app.get('/api/jobs/:id/run', (req, res) => {
       .get(jobId) as RunRow | undefined;
   }
 
-  res.json({ job, run: run ?? null });
+  res.json({ job, run: run ?? null, runs });
 });
 
 app.delete('/api/jobs/:id', async (req, res) => {
@@ -343,8 +452,7 @@ app.get('/api/rows', (req, res) => {
 });
 
 app.get('/api/csv', async (_req, res) => {
-  const exists = fs.existsSync(paths.outputCsvPath);
-  if (!exists) await exportCsv(db, paths.outputCsvPath);
+  await exportCsv(db, paths.outputCsvPath);
 
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', 'attachment; filename="output.csv"');
