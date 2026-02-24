@@ -24,10 +24,11 @@ pnpm-debug.log*
 Thumbs.db
 
 # Mounted files volume contents (keep folders + .gitkeep)
-apps/server/files/new/*
+apps/server/files
 !/apps/server/files/new/.gitkeep
 apps/server/files/completed/*
 !/apps/server/files/completed/.gitkeep
 apps/server/files/state/*
 !/apps/server/files/state/.gitkeep
 /apps/server/files/output.csv
+/files

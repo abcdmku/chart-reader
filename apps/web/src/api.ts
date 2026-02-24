@@ -1,4 +1,4 @@
-import type { Config, RowsResponse, StateResponse } from './types';
+import type { Config, JobRunDetailsResponse, RowsResponse, StateResponse } from './types';
 
 export async function getState(signal?: AbortSignal): Promise<StateResponse> {
   const response = await fetch('/api/state', { signal });
@@ -45,6 +45,12 @@ export async function uploadFiles(files: File[]): Promise<{ jobs: unknown[] }> {
 export async function rerunJob(jobId: string): Promise<void> {
   const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/rerun`, { method: 'POST' });
   if (!response.ok) throw new Error('Failed to rerun job');
+}
+
+export async function getJobRunDetails(jobId: string, signal?: AbortSignal): Promise<JobRunDetailsResponse> {
+  const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/run`, { signal });
+  if (!response.ok) throw new Error('Failed to fetch run details');
+  return (await response.json()) as JobRunDetailsResponse;
 }
 
 export async function deleteJob(jobId: string): Promise<void> {

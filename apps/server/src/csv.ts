@@ -52,21 +52,24 @@ export async function exportCsv(db: Db, outputCsvPath: string): Promise<{ update
   const rows = db
     .prepare(
       `SELECT
-        entry_date,
-        chart_title,
-        chart_section,
-        this_week_rank,
-        last_week_rank,
-        two_weeks_ago_rank,
-        weeks_on_chart,
-        title,
-        artist,
-        label,
-        source_file,
-        run_id,
-        extracted_at
-      FROM chart_rows
-      ORDER BY id ASC`,
+        cr.entry_date,
+        cr.chart_title,
+        cr.chart_section,
+        cr.this_week_rank,
+        cr.last_week_rank,
+        cr.two_weeks_ago_rank,
+        cr.weeks_on_chart,
+        cr.title,
+        cr.artist,
+        cr.label,
+        cr.source_file,
+        cr.run_id,
+        cr.extracted_at
+      FROM chart_rows AS cr
+      INNER JOIN jobs AS j
+        ON j.id = cr.job_id
+       AND j.last_run_id = cr.run_id
+      ORDER BY cr.id ASC`,
     )
     .all() as CsvRow[];
 

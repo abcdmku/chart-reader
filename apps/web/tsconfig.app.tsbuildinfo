@@ -1,1 +1,1 @@
-{"root":["./src/app.tsx","./src/api.ts","./src/main.tsx","./src/types.ts","./src/vite-env.d.ts"],"version":"5.9.3"}
+{"root":["./src/app.tsx","./src/api.ts","./src/main.tsx","./src/types.ts","./src/useappstate.ts","./src/vite-env.d.ts","./src/components/chartdatatable.tsx","./src/components/imagemodal.tsx","./src/components/jobsidebar.tsx","./src/components/rundetailsmodal.tsx","./src/pages/dashboard.tsx"],"version":"5.9.3"}

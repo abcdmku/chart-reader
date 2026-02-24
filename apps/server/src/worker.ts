@@ -288,9 +288,6 @@ export class Worker {
         }
       });
 
-      this.setProgress(job.id, 'exporting_csv');
-      await this.enqueueCsvExport();
-
       let finalFilename = job.filename;
       let finalLocation: FileLocation = fileLocation;
 
@@ -317,6 +314,7 @@ export class Worker {
         }
       }
 
+      this.setProgress(job.id, 'exporting_csv');
       this.setCompleted({
         jobId: job.id,
         runId,
@@ -324,6 +322,7 @@ export class Worker {
         filename: finalFilename,
         fileLocation: finalLocation,
       });
+      await this.enqueueCsvExport();
     } catch (error) {
       this.setError(job.id, (error as Error).message);
     } finally {

@@ -1,7 +1,8 @@
 import { google } from '@ai-sdk/google';
-import { generateObject } from 'ai';
+import { generateText, Output, zodSchema } from 'ai';
 import { z } from 'zod';
 import type { ExtractionResult } from './types.js';
+import { normalizeExtractedText, normalizeRankText } from './utils/normalizeExtractedText.js';
 
 const ExtractedRowSchema = z.object({
   chartTitle: z.string().min(1),
@@ -24,52 +25,94 @@ export async function extractChartRows(args: {
   mimeType: string;
   model: string;
 }): Promise<{ result: ExtractionResult; rawResultJson: string }> {
-  const prompt = [
-    'You are extracting tabular chart data from a scanned Billboard chart image.',
-    '',
-    'Goal: return a JSON object with `rows` (an array). Each row represents one entry on a chart.',
-    '',
-    'The image can contain:',
-    '- a single chart block, or',
-    '- two different chart blocks (different chart titles), or',
-    '- one chart split into sections (e.g. "TOP 80" and "TOP 100").',
-    '',
-    'For every extracted row, include:',
-    '- chartTitle: the overall chart title for the block (e.g. "12 INCH SINGLES SALES", "CLUB PLAY")',
-    '- chartSection: the section/sub-chart heading (e.g. "TOP 80", "TOP 100") or empty string if none',
-    '- thisWeekRank, lastWeekRank, twoWeeksAgoRank, weeksOnChart: as text (may be blank/null if unreadable)',
-    '- title, artist, label: as printed in the chart',
-    '',
-    'Rules:',
-    '- Do not invent values. If unreadable, use null or empty string.',
-    '- Preserve row order as it appears in the image within each chart block/section.',
-    '- Only return valid JSON matching the schema.',
+  const systemPrompt = [
+    'You are a high-precision OCR + table extraction engine for scanned Billboard chart pages.',
+    'Return only JSON that matches the provided schema (no commentary, no markdown).',
+    'Never guess: if you cannot confidently read something, prefer null (for rank fields) or omit the row (for required text fields).',
+    'Never mix data across different chart tables on the same page.',
   ].join('\n');
 
-  const response = await generateObject({
+  const userPrompt = [
+    'Extract chart table rows from this scanned Billboard page.',
+    '',
+    'Output format: a JSON object with `rows` (an array). Each row is one chart entry.',
+    '',
+    'Terminology:',
+    '- A "chart block" is one chart table with its own chart title and column headers. Pages can have multiple chart blocks.',
+    '- chartTitle: the specific chart title for the chart block (e.g. "12 INCH SINGLES SALES", "CLUB PLAY", "DISCO TOP 80"). Do not include the "Billboard" masthead.',
+    '- chartSection: the broader page/category header that groups charts on the page (e.g. "HOT DANCE/DISCO"). If none, use "" (empty string).',
+    '',
+    'Critical rules (do not violate):',
+    '1) Multi-chart pages: if there are multiple chart blocks (side-by-side or stacked), treat them as completely separate tables.',
+    '   - NEVER copy ranks from one chart block onto rows from another chart block, even if the rows line up horizontally.',
+    '   - Extract all rows for one chart block before moving to the next chart block.',
+    '   - If a single chart is laid out in multiple columns (same chartTitle repeated with separate column headers), treat each column as an independent table region and never combine cells across columns.',
+    '2) Ranks (thisWeekRank/lastWeekRank/twoWeeksAgoRank/weeksOnChart):',
+    '   - Only read rank values from the columns in the SAME chart block as the row\'s title/artist/label.',
+    '   - Ignore decorative icons/symbols (stars, circles, bullets) printed near or around ranks; they are not part of the number.',
+    '   - If a rank cell is blank, a dash (like "-"), "NEW", or unreadable, return null for that field.',
+    '   - Return ranks as digits only (e.g. "12"), not "12*", "(12)", or "star 12".',
+    '3) Text fields (title/artist/label):',
+    '   - Copy the printed text from the SAME row of the SAME chart block.',
+    '   - Trim whitespace and remove trailing separator dashes (e.g. "SONG TITLE -" => "SONG TITLE").',
+    '   - Ignore decorative bullets/symbols that are not part of the text.',
+    '4) Scope: extract ONLY chart table rows. Ignore articles, ads, and sidebars that are not chart tables.',
+    '',
+    'Ordering: preserve row order top-to-bottom within each table region; output regions in reading order (left-to-right, then top-to-bottom).',
+    '',
+    'Example mapping: if the page header says "HOT DANCE/DISCO" and it contains two charts titled "12 INCH SINGLES SALES" and "CLUB PLAY", then chartSection="HOT DANCE/DISCO" for both charts, and chartTitle is the chart\'s own title.',
+    '',
+    'If you cannot confidently extract a row\'s title OR artist OR label, omit that row (do not guess).',
+    '',
+    'Return only valid JSON.',
+  ].join('\n');
+
+  const response = await generateText({
     model: google(args.model),
-    schema: ExtractionSchema,
+    output: Output.object({
+      schema: zodSchema(ExtractionSchema),
+      name: 'billboard_chart_rows',
+      description: 'Extracted chart rows from scanned Billboard chart tables.',
+    }),
+    temperature: 0,
     messages: [
-      { role: 'system', content: 'You are a careful data extraction engine.' },
+      { role: 'system', content: systemPrompt },
       {
         role: 'user',
         content: [
-          { type: 'text', text: prompt },
-          { type: 'image', image: args.image, mimeType: args.mimeType },
+          { type: 'text', text: userPrompt },
+          { type: 'image', image: args.image, mediaType: args.mimeType },
         ],
       },
     ],
   });
 
+  const normalizedResult: ExtractionResult = {
+    rows: response.output.rows
+      .map((row) => ({
+        ...row,
+        chartTitle: normalizeExtractedText(row.chartTitle),
+        chartSection: normalizeExtractedText(row.chartSection ?? ''),
+        thisWeekRank: normalizeRankText(row.thisWeekRank),
+        lastWeekRank: normalizeRankText(row.lastWeekRank),
+        twoWeeksAgoRank: normalizeRankText(row.twoWeeksAgoRank),
+        weeksOnChart: normalizeRankText(row.weeksOnChart),
+        title: normalizeExtractedText(row.title),
+        artist: normalizeExtractedText(row.artist),
+        label: normalizeExtractedText(row.label),
+      }))
+      .filter((row) => row.chartTitle && row.title && row.artist && row.label),
+  };
+
   const rawResultJson = JSON.stringify(
     {
-      object: response.object,
-      usage: response.usage,
+      object: normalizedResult,
+      usage: response.totalUsage,
       warnings: response.warnings,
     },
     null,
     2,
   );
 
-  return { result: response.object, rawResultJson };
+  return { result: normalizedResult, rawResultJson };
 }

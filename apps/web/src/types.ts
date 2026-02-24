@@ -23,9 +23,24 @@ export type Job = {
   file_location: FileLocation;
 };
 
+export type Run = {
+  run_id: string;
+  job_id: string;
+  model: string;
+  extracted_at: string;
+  rows_inserted: number;
+  raw_result_json: string;
+};
+
 export type StateResponse = {
   config: Config;
   jobs: Job[];
+  avg_duration_ms: number | null;
+};
+
+export type JobRunDetailsResponse = {
+  job: Job;
+  run: Run | null;
 };
 
 export type ChartRow = {

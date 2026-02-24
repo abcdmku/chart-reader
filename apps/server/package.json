@@ -15,8 +15,8 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@ai-sdk/google": "^1.2.22",
-    "ai": "^4.0.0",
+    "@ai-sdk/google": "^3.0.30",
+    "ai": "^6.0.97",
     "express": "^4.19.2",
     "mime-types": "^2.1.35",
     "multer": "^2.0.2",

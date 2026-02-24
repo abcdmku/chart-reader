@@ -14,6 +14,12 @@ export type Db = {
 
 const require = createRequire(import.meta.url);
 
+function normalizeGeminiModelId(model: string): string {
+  // Back-compat: older UI/server versions used `gemini-3-flash`, but the provider expects `gemini-3-flash-preview`.
+  if (model === 'gemini-3-flash') return 'gemini-3-flash-preview';
+  return model;
+}
+
 function getDatabaseSyncCtor(): new (path: string) => Db {
   const modName = 'node:sqlite';
   // Avoid static analysis issues in some bundlers by not using an import statement.
@@ -86,7 +92,7 @@ export function migrate(db: Db): void {
     CREATE INDEX IF NOT EXISTS idx_chart_rows_run_id ON chart_rows(run_id);
   `);
 
-  const defaultModel = process.env.GEMINI_MODEL?.trim() || 'gemini-2.5-flash';
+  const defaultModel = normalizeGeminiModelId(process.env.GEMINI_MODEL?.trim() || 'gemini-2.5-flash');
   db.prepare(
     `INSERT INTO config (id, concurrency, paused, model)
      VALUES (1, 2, 0, ?)
@@ -115,7 +121,13 @@ export function getConfig(db: Db): Config {
     | { concurrency: number; paused: number; model: string }
     | undefined;
   if (!row) return { concurrency: 2, paused: false, model: 'gemini-2.5-flash' };
-  return { concurrency: row.concurrency, paused: row.paused === 1, model: row.model };
+
+  const normalizedModel = normalizeGeminiModelId(row.model);
+  if (normalizedModel !== row.model) {
+    db.prepare('UPDATE config SET model = ? WHERE id = 1').run(normalizedModel);
+  }
+
+  return { concurrency: row.concurrency, paused: row.paused === 1, model: normalizedModel };
 }
 
 export function updateConfig(db: Db, next: Partial<Config>): Config {
@@ -123,7 +135,7 @@ export function updateConfig(db: Db, next: Partial<Config>): Config {
   const merged: Config = {
     concurrency: next.concurrency ?? current.concurrency,
     paused: next.paused ?? current.paused,
-    model: next.model ?? current.model,
+    model: normalizeGeminiModelId(next.model ?? current.model),
   };
 
   db.prepare('UPDATE config SET concurrency = ?, paused = ?, model = ? WHERE id = 1').run(

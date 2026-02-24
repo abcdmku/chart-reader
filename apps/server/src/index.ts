@@ -14,8 +14,38 @@ import type { Config, Job } from './types.js';
 import { parseEntryDate } from './utils/parseEntryDate.js';
 import { Worker } from './worker.js';
 
+function normalizeGeminiModelId(model: string): string {
+  if (model === 'gemini-3-flash') return 'gemini-3-flash-preview';
+  return model;
+}
+
+const ALLOWED_MODELS = new Set(['gemini-2.5-flash', 'gemini-2-flash', 'gemini-3-flash-preview']);
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+function loadLocalEnvFiles(): void {
+  if (typeof process.loadEnvFile !== 'function') return;
+
+  // Support both repo-root `.env` and `apps/server/.env` in tsx and built dist runs.
+  const candidates = [
+    path.resolve(process.cwd(), '.env'),
+    path.resolve(process.cwd(), 'apps/server/.env'),
+    path.resolve(__dirname, '../.env'),
+    path.resolve(__dirname, '../../.env'),
+    path.resolve(__dirname, '../../../.env'),
+  ];
+
+  const seen = new Set<string>();
+  for (const envPath of candidates) {
+    if (seen.has(envPath)) continue;
+    seen.add(envPath);
+    if (!fs.existsSync(envPath)) continue;
+    process.loadEnvFile(envPath);
+  }
+}
+
+loadLocalEnvFiles();
 
 const paths = getPaths();
 ensureDirectories(paths);
@@ -26,10 +56,24 @@ db.prepare("UPDATE jobs SET status = 'queued', progress_step = NULL WHERE status
 const sse = new SseHub();
 const worker = new Worker(db, { newDir: paths.newDir, completedDir: paths.completedDir, outputCsvPath: paths.outputCsvPath }, sse);
 
-function buildState(): { config: Config; jobs: Job[] } {
+function getAvgDurationMs(): number | null {
+  const row = db
+    .prepare(
+      `SELECT AVG(
+        (julianday(finished_at) - julianday(started_at)) * 86400000
+      ) AS avg_ms
+      FROM jobs
+      WHERE status = 'completed' AND started_at IS NOT NULL AND finished_at IS NOT NULL`,
+    )
+    .get() as { avg_ms: number | null } | undefined;
+  return row?.avg_ms ?? null;
+}
+
+function buildState(): { config: Config; jobs: Job[]; avg_duration_ms: number | null } {
   return {
     config: getConfig(db),
     jobs: listJobs(db),
+    avg_duration_ms: getAvgDurationMs(),
   };
 }
 
@@ -78,7 +122,16 @@ app.post('/api/config', (req, res) => {
   }
 
   if (body.paused != null) next.paused = Boolean(body.paused);
-  if (body.model != null) next.model = String(body.model);
+  if (body.model != null) {
+    const model = normalizeGeminiModelId(String(body.model));
+    if (!ALLOWED_MODELS.has(model)) {
+      res
+        .status(400)
+        .json({ error: 'model must be one of gemini-2.5-flash, gemini-2-flash, gemini-3-flash-preview' });
+      return;
+    }
+    next.model = model;
+  }
 
   const updated = updateConfig(db, next);
   sse.send('config', updated);
@@ -211,6 +264,36 @@ app.post('/api/jobs/:id/rerun', (req, res) => {
   res.json({ ok: true });
 });
 
+app.get('/api/jobs/:id/run', (req, res) => {
+  const jobId = req.params.id;
+  const job = db.prepare('SELECT * FROM jobs WHERE id = ?').get(jobId) as Job | undefined;
+  if (!job) {
+    res.status(404).json({ error: 'job not found' });
+    return;
+  }
+
+  type RunRow = {
+    run_id: string;
+    job_id: string;
+    model: string;
+    extracted_at: string;
+    rows_inserted: number;
+    raw_result_json: string;
+  };
+
+  let run: RunRow | undefined;
+  if (job.last_run_id) {
+    run = db.prepare('SELECT * FROM runs WHERE run_id = ?').get(job.last_run_id) as RunRow | undefined;
+  }
+  if (!run) {
+    run = db
+      .prepare('SELECT * FROM runs WHERE job_id = ? ORDER BY extracted_at DESC LIMIT 1')
+      .get(jobId) as RunRow | undefined;
+  }
+
+  res.json({ job, run: run ?? null });
+});
+
 app.delete('/api/jobs/:id', async (req, res) => {
   const jobId = req.params.id;
   const job = db.prepare('SELECT * FROM jobs WHERE id = ?').get(jobId) as Job | undefined;
@@ -266,6 +349,33 @@ app.get('/api/csv', async (_req, res) => {
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', 'attachment; filename="output.csv"');
   fs.createReadStream(paths.outputCsvPath).pipe(res);
+});
+
+app.get('/api/images/:filename', (req, res) => {
+  const filename = req.params.filename;
+  const sanitized = path.basename(filename);
+  if (sanitized !== filename || filename.includes('..')) {
+    res.status(400).json({ error: 'Invalid filename' });
+    return;
+  }
+  if (!isSupportedImageFile(sanitized)) {
+    res.status(400).json({ error: 'Unsupported file type' });
+    return;
+  }
+
+  res.setHeader('Cache-Control', 'public, max-age=86400');
+
+  const completedPath = path.join(paths.completedDir, sanitized);
+  if (fs.existsSync(completedPath)) {
+    res.sendFile(completedPath);
+    return;
+  }
+  const newPath = path.join(paths.newDir, sanitized);
+  if (fs.existsSync(newPath)) {
+    res.sendFile(newPath);
+    return;
+  }
+  res.status(404).json({ error: 'Image not found' });
 });
 
 app.get('/api/events', (req, res) => {
