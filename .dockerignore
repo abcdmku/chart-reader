@@ -1,0 +1,13 @@
+node_modules
+dist
+build
+coverage
+.git
+.github
+.vscode
+.env
+apps/server/public
+files/new
+files/completed
+files/state
+files/output.csv
