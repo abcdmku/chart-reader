@@ -6,11 +6,15 @@ export async function getState(signal?: AbortSignal): Promise<StateResponse> {
   return (await response.json()) as StateResponse;
 }
 
-export async function getRows(params: { limit?: number; offset?: number; order?: 'asc' | 'desc' }, signal?: AbortSignal) {
+export async function getRows(
+  params: { limit?: number; offset?: number; order?: 'asc' | 'desc'; latestOnly?: boolean },
+  signal?: AbortSignal,
+) {
   const search = new URLSearchParams();
   if (params.limit != null) search.set('limit', String(params.limit));
   if (params.offset != null) search.set('offset', String(params.offset));
   if (params.order != null) search.set('order', params.order);
+  if (params.latestOnly) search.set('latest_only', '1');
 
   const response = await fetch(`/api/rows?${search.toString()}`, { signal });
   if (!response.ok) throw new Error('Failed to fetch rows');

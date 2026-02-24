@@ -2,6 +2,28 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { deleteJob, getRows, getState, rerunJob, scan, stopJob, updateConfig, uploadFiles } from './api';
 import type { Config, Job, RowsResponse } from './types';
 
+const LS_LATEST_ONLY = 'chart-view-latest-only';
+
+function loadLatestOnlyPreference(): boolean {
+  try {
+    const raw = localStorage.getItem(LS_LATEST_ONLY);
+    if (raw == null) return true;
+    const normalized = raw.trim().toLowerCase();
+    if (normalized === '0' || normalized === 'false' || normalized === 'off' || normalized === 'no') return false;
+    return true;
+  } catch {
+    return true;
+  }
+}
+
+function saveLatestOnlyPreference(value: boolean): void {
+  try {
+    localStorage.setItem(LS_LATEST_ONLY, value ? '1' : '0');
+  } catch {
+    // ignore
+  }
+}
+
 function isAbortError(error: unknown): boolean {
   return (
     typeof error === 'object' &&
@@ -24,6 +46,7 @@ export type AppState = {
   jobs: Job[];
   avgDurationMs: number | null;
   rowsState: RowsResponse | null;
+  latestOnly: boolean;
   error: string | null;
   uploading: boolean;
   selectedFiles: File[];
@@ -32,6 +55,7 @@ export type AppState = {
   onSetConcurrency: (concurrency: number) => Promise<void>;
   onSetModel: (model: string) => Promise<void>;
   onTogglePause: () => Promise<void>;
+  onSetLatestOnly: (latestOnly: boolean) => Promise<void>;
   onUpload: () => Promise<void>;
   onRerun: (jobId: string) => Promise<void>;
   onStop: (jobId: string) => Promise<void>;
@@ -44,6 +68,8 @@ export function useAppState(): AppState {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [avgDurationMs, setAvgDurationMs] = useState<number | null>(null);
   const [rowsState, setRowsState] = useState<RowsResponse | null>(null);
+  const [latestOnly, setLatestOnly] = useState<boolean>(() => loadLatestOnlyPreference());
+  const latestOnlyRef = useRef(latestOnly);
   const [error, setError] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
@@ -55,6 +81,10 @@ export function useAppState(): AppState {
     configRef.current = config;
   }, [config]);
 
+  useEffect(() => {
+    latestOnlyRef.current = latestOnly;
+  }, [latestOnly]);
+
   const refreshState = useCallback(async (signal?: AbortSignal) => {
     const s = await getState(signal);
     setConfig(s.config);
@@ -63,8 +93,9 @@ export function useAppState(): AppState {
     setAvgDurationMs(s.avg_duration_ms);
   }, []);
 
-  const refreshRows = useCallback(async (signal?: AbortSignal) => {
-    const next = await getRows({ limit: 500, offset: 0, order: 'desc' }, signal);
+  const refreshRows = useCallback(async (signal?: AbortSignal, latestOnlyOverride?: boolean) => {
+    const latestOnlyValue = latestOnlyOverride ?? latestOnlyRef.current;
+    const next = await getRows({ limit: 500, offset: 0, order: 'desc', latestOnly: latestOnlyValue }, signal);
     setRowsState(next);
   }, []);
 
@@ -198,6 +229,22 @@ export function useAppState(): AppState {
     await mutateConfig({ paused: !current.paused });
   }, [mutateConfig]);
 
+  const onSetLatestOnly = useCallback(
+    async (value: boolean) => {
+      setLatestOnly(value);
+      latestOnlyRef.current = value;
+      saveLatestOnlyPreference(value);
+
+      try {
+        setError(null);
+        await refreshRows(undefined, value);
+      } catch (e: unknown) {
+        setError((e as Error).message);
+      }
+    },
+    [refreshRows],
+  );
+
   const onUpload = useCallback(async () => {
     if (selectedFiles.length === 0) return;
     try {
@@ -246,6 +293,7 @@ export function useAppState(): AppState {
     jobs,
     avgDurationMs,
     rowsState,
+    latestOnly,
     error,
     uploading,
     selectedFiles,
@@ -254,6 +302,7 @@ export function useAppState(): AppState {
     onSetConcurrency,
     onSetModel,
     onTogglePause,
+    onSetLatestOnly,
     onUpload,
     onRerun,
     onStop,

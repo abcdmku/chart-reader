@@ -18,6 +18,7 @@ export function Dashboard({ state }: { state: AppState }) {
     config,
     jobs,
     rowsState,
+    latestOnly,
     error,
     selectedFiles,
     setSelectedFiles,
@@ -27,6 +28,7 @@ export function Dashboard({ state }: { state: AppState }) {
     onSetConcurrency,
     onSetModel,
     onTogglePause,
+    onSetLatestOnly,
   } = state;
 
   const rows = rowsState?.rows ?? [];
@@ -213,7 +215,12 @@ export function Dashboard({ state }: { state: AppState }) {
           onImageClick={setModalImage}
         />
         <main className="flex flex-1 flex-col overflow-hidden">
-          <ChartDataTable rows={filteredRows} totalRows={filteredTotalRows} />
+          <ChartDataTable
+            rows={filteredRows}
+            totalRows={filteredTotalRows}
+            latestOnly={latestOnly}
+            onLatestOnlyChange={onSetLatestOnly}
+          />
         </main>
       </div>
 

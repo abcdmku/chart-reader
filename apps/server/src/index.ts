@@ -443,9 +443,59 @@ app.get('/api/rows', (req, res) => {
   const offset = Math.max(0, Number(req.query.offset ?? 0));
   const order = String(req.query.order ?? 'desc') === 'asc' ? 'asc' : 'desc';
 
-  const total = (db.prepare('SELECT COUNT(*) AS count FROM chart_rows').get() as { count: number }).count;
+  const latestOnlyRaw = String(req.query.latest_only ?? req.query.latestOnly ?? '').trim().toLowerCase();
+  const latestOnly = latestOnlyRaw === '1' || latestOnlyRaw === 'true' || latestOnlyRaw === 'yes' || latestOnlyRaw === 'on';
+
+  if (!latestOnly) {
+    const total = (db.prepare('SELECT COUNT(*) AS count FROM chart_rows').get() as { count: number }).count;
+    const rows = db
+      .prepare(`SELECT * FROM chart_rows ORDER BY id ${order.toUpperCase()} LIMIT ? OFFSET ?`)
+      .all(limit, offset);
+
+    res.json({ rows, total });
+    return;
+  }
+
+  const latestRunsCte = `
+    WITH latest_runs AS (
+      SELECT
+        j.id AS job_id,
+        COALESCE(
+          j.last_run_id,
+          (
+            SELECT r.run_id
+            FROM runs r
+            WHERE r.job_id = j.id
+            ORDER BY r.extracted_at DESC
+            LIMIT 1
+          )
+        ) AS run_id
+      FROM jobs j
+    )
+  `;
+
+  const total = (
+    db.prepare(
+      `${latestRunsCte}
+       SELECT COUNT(*) AS count
+       FROM chart_rows cr
+       JOIN latest_runs lr
+         ON lr.job_id = cr.job_id
+        AND lr.run_id = cr.run_id`,
+    ).get() as { count: number }
+  ).count;
+
   const rows = db
-    .prepare(`SELECT * FROM chart_rows ORDER BY id ${order.toUpperCase()} LIMIT ? OFFSET ?`)
+    .prepare(
+      `${latestRunsCte}
+       SELECT cr.*
+       FROM chart_rows cr
+       JOIN latest_runs lr
+         ON lr.job_id = cr.job_id
+        AND lr.run_id = cr.run_id
+       ORDER BY cr.id ${order.toUpperCase()}
+       LIMIT ? OFFSET ?`,
+    )
     .all(limit, offset);
 
   res.json({ rows, total });
