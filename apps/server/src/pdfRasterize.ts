@@ -1,9 +1,35 @@
+import path from 'node:path';
+import { createRequire } from 'node:module';
 import { createCanvas } from '@napi-rs/canvas';
 import { getDocument } from 'pdfjs-dist/legacy/build/pdf.mjs';
 
 const PDF_POINTS_PER_INCH = 72;
 const DEFAULT_PDF_RASTER_DPI = 300;
 const MODEL_IMAGE_QUALITY = 0.9;
+const MAX_RENDER_PIXELS = 12_000_000; // ~48 MB RGBA canvas before encoder overhead
+const MAX_RENDER_DIMENSION = 4096;
+const require = createRequire(import.meta.url);
+
+function normalizeDirPath(dirPath: string): string {
+  return dirPath.endsWith(path.sep) ? dirPath : `${dirPath}${path.sep}`;
+}
+
+function resolvePdfJsAssetUrls(): { standardFontDataUrl?: string; wasmUrl?: string } {
+  try {
+    const pdfjsPkg = require.resolve('pdfjs-dist/package.json');
+    const pdfjsRoot = path.dirname(pdfjsPkg);
+    return {
+      // In Node, pdfjs loads these via filesystem APIs; plain absolute paths work
+      // more reliably than file:// URLs (especially in Docker).
+      standardFontDataUrl: normalizeDirPath(path.join(pdfjsRoot, 'standard_fonts')),
+      wasmUrl: normalizeDirPath(path.join(pdfjsRoot, 'wasm')),
+    };
+  } catch {
+    return {};
+  }
+}
+
+const PDFJS_ASSET_URLS = resolvePdfJsAssetUrls();
 
 function makeAbortError(reason?: unknown): Error {
   const message = typeof reason === 'string' && reason.trim() ? reason : 'Aborted';
@@ -29,8 +55,7 @@ export async function rasterizePdfFirstPageForModel(args: {
   width: number;
   height: number;
 }> {
-  const dpi = args.dpi ?? DEFAULT_PDF_RASTER_DPI;
-  const scale = dpi / PDF_POINTS_PER_INCH;
+  const requestedDpi = args.dpi ?? DEFAULT_PDF_RASTER_DPI;
   throwIfAborted(args.abortSignal);
 
   const pdfBytes = new Uint8Array(args.fileData.buffer, args.fileData.byteOffset, args.fileData.byteLength);
@@ -41,6 +66,7 @@ export async function rasterizePdfFirstPageForModel(args: {
     isImageDecoderSupported: false,
     useSystemFonts: false,
     disableFontFace: true,
+    ...PDFJS_ASSET_URLS,
   });
 
   const onAbort = () => {
@@ -58,9 +84,26 @@ export async function rasterizePdfFirstPageForModel(args: {
       throwIfAborted(args.abortSignal);
       const page = await pdf.getPage(1);
       try {
-        const viewport = page.getViewport({ scale });
+        const requestedScale = requestedDpi / PDF_POINTS_PER_INCH;
+        const requestedViewport = page.getViewport({ scale: requestedScale });
+
+        const requestedWidth = Math.max(1, Math.ceil(requestedViewport.width));
+        const requestedHeight = Math.max(1, Math.ceil(requestedViewport.height));
+        const requestedPixels = requestedWidth * requestedHeight;
+
+        const dimensionScale = Math.min(
+          1,
+          MAX_RENDER_DIMENSION / requestedWidth,
+          MAX_RENDER_DIMENSION / requestedHeight,
+        );
+        const pixelScale = Math.min(1, Math.sqrt(MAX_RENDER_PIXELS / requestedPixels));
+        const downscale = Math.min(dimensionScale, pixelScale);
+        const effectiveScale = requestedScale * (Number.isFinite(downscale) ? downscale : 1);
+
+        const viewport = page.getViewport({ scale: Math.max(effectiveScale, 1 / PDF_POINTS_PER_INCH) });
         const width = Math.max(1, Math.ceil(viewport.width));
         const height = Math.max(1, Math.ceil(viewport.height));
+        const actualDpi = Math.max(1, Math.round((requestedDpi * width) / Math.max(1, requestedWidth)));
         const canvas = createCanvas(width, height);
 
         const renderTask = page.render({
@@ -96,7 +139,7 @@ export async function rasterizePdfFirstPageForModel(args: {
           return {
             fileData: canvas.toBuffer('image/webp', MODEL_IMAGE_QUALITY),
             mimeType: 'image/webp',
-            dpi,
+            dpi: actualDpi,
             pageCount: pdf.numPages,
             width,
             height,
@@ -105,7 +148,7 @@ export async function rasterizePdfFirstPageForModel(args: {
           return {
             fileData: canvas.toBuffer('image/jpeg', MODEL_IMAGE_QUALITY),
             mimeType: 'image/jpeg',
-            dpi,
+            dpi: actualDpi,
             pageCount: pdf.numPages,
             width,
             height,

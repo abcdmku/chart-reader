@@ -352,21 +352,23 @@ export class Worker {
       }
 
       this.throwIfCancelled(job.id, controller.signal);
-      const fileData = await fsp.readFile(filePath);
-      let modelFileData: Buffer = fileData;
+      let modelFileData: Buffer;
       let modelMimeType = mimeType;
 
       if (mimeType === 'application/pdf') {
+        const pdfFileData = await fsp.readFile(filePath);
         this.throwIfCancelled(job.id, controller.signal);
         this.setProgress(job.id, 'rasterizing_pdf');
 
         const rasterized = await rasterizePdfFirstPageForModel({
-          fileData,
+          fileData: pdfFileData,
           dpi: 300,
           abortSignal: controller.signal,
         });
         modelFileData = rasterized.fileData;
         modelMimeType = rasterized.mimeType;
+      } else {
+        modelFileData = await fsp.readFile(filePath);
       }
 
       this.throwIfCancelled(job.id, controller.signal);
