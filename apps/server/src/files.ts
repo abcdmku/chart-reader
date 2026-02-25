@@ -1,11 +1,24 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-const SUPPORTED_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp']);
+const SUPPORTED_IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp']);
+const SUPPORTED_PDF_EXTENSIONS = new Set(['.pdf']);
+const SUPPORTED_EXTENSIONS = new Set([...SUPPORTED_IMAGE_EXTENSIONS, ...SUPPORTED_PDF_EXTENSIONS]);
 
 export function isSupportedImageFile(filename: string): boolean {
   const ext = path.extname(filename).toLowerCase();
+  return SUPPORTED_IMAGE_EXTENSIONS.has(ext);
+}
+
+export function isSupportedSourceFile(filename: string): boolean {
+  const ext = path.extname(filename).toLowerCase();
   return SUPPORTED_EXTENSIONS.has(ext);
+}
+
+export function isSupportedUploadMimeType(mimeType: string): boolean {
+  if (!mimeType) return false;
+  if (mimeType.startsWith('image/')) return true;
+  return mimeType === 'application/pdf';
 }
 
 export function sanitizeFilename(originalName: string): string {
@@ -40,10 +53,10 @@ export function makeUniqueFilename(
   throw new Error('Unable to find a unique filename');
 }
 
-export async function listSupportedImages(dirPath: string): Promise<string[]> {
+export async function listSupportedSourceFiles(dirPath: string): Promise<string[]> {
   const entries = await fs.promises.readdir(dirPath, { withFileTypes: true });
   return entries
-    .filter((entry) => entry.isFile() && isSupportedImageFile(entry.name))
+    .filter((entry) => entry.isFile() && isSupportedSourceFile(entry.name))
     .map((entry) => entry.name)
     .sort((a, b) => a.localeCompare(b));
 }

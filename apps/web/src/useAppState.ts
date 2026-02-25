@@ -49,14 +49,12 @@ export type AppState = {
   latestOnly: boolean;
   error: string | null;
   uploading: boolean;
-  selectedFiles: File[];
-  setSelectedFiles: (files: File[]) => void;
   configDraft: { concurrency: number; model: string } | null;
   onSetConcurrency: (concurrency: number) => Promise<void>;
   onSetModel: (model: string) => Promise<void>;
   onTogglePause: () => Promise<void>;
   onSetLatestOnly: (latestOnly: boolean) => Promise<void>;
-  onUpload: () => Promise<void>;
+  onUploadFiles: (files: File[]) => Promise<void>;
   onRerun: (jobId: string) => Promise<void>;
   onStop: (jobId: string) => Promise<void>;
   onDelete: (jobId: string) => Promise<void>;
@@ -73,7 +71,6 @@ export function useAppState(): AppState {
   const latestOnlyRef = useRef(latestOnly);
   const [error, setError] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
-  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [configDraft, setConfigDraft] = useState<{ concurrency: number; model: string } | null>(null);
   const scanningRef = useRef(false);
   const configUpdateSeqRef = useRef(0);
@@ -246,19 +243,18 @@ export function useAppState(): AppState {
     [refreshRows],
   );
 
-  const onUpload = useCallback(async () => {
-    if (selectedFiles.length === 0) return;
+  const onUploadFiles = useCallback(async (files: File[]) => {
+    if (files.length === 0) return;
     try {
       setError(null);
       setUploading(true);
-      await uploadFiles(selectedFiles);
-      setSelectedFiles([]);
+      await uploadFiles(files);
     } catch (e: unknown) {
       setError((e as Error).message);
     } finally {
       setUploading(false);
     }
-  }, [selectedFiles]);
+  }, []);
 
   const onRerun = useCallback(async (jobId: string) => {
     try {
@@ -307,14 +303,12 @@ export function useAppState(): AppState {
     latestOnly,
     error,
     uploading,
-    selectedFiles,
-    setSelectedFiles,
     configDraft,
     onSetConcurrency,
     onSetModel,
     onTogglePause,
     onSetLatestOnly,
-    onUpload,
+    onUploadFiles,
     onRerun,
     onStop,
     onDelete,

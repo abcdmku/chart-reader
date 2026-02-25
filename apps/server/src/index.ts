@@ -7,7 +7,14 @@ import multer from 'multer';
 import { nanoid } from 'nanoid';
 import { exportCsv } from './csv.js';
 import { getConfig, listJobs, openDb, updateConfig } from './db.js';
-import { isSupportedImageFile, listSupportedImages, makeUniqueFilename, sanitizeFilename } from './files.js';
+import {
+  isSupportedImageFile,
+  isSupportedSourceFile,
+  isSupportedUploadMimeType,
+  listSupportedSourceFiles,
+  makeUniqueFilename,
+  sanitizeFilename,
+} from './files.js';
 import { ensureDirectories, getPaths } from './paths.js';
 import { SseHub } from './sse.js';
 import type { Config, Job } from './types.js';
@@ -94,8 +101,8 @@ const upload = multer({
     },
   }),
   fileFilter: (_req, file, cb) => {
-    const extOk = isSupportedImageFile(file.originalname);
-    const mimeOk = file.mimetype.startsWith('image/');
+    const extOk = isSupportedSourceFile(file.originalname);
+    const mimeOk = isSupportedUploadMimeType(file.mimetype);
     cb(null, extOk && mimeOk);
   },
   limits: { files: 200 },
@@ -127,7 +134,7 @@ app.post('/api/config', (req, res) => {
     if (!ALLOWED_MODELS.has(model)) {
       res
         .status(400)
-        .json({ error: 'model must be one of gemini-2.5-flash, gemini-2-flash, gemini-3-flash-preview' });
+        .json({ error: 'model must be one of gemini-2.5-flash, gemini-2.5-pro, gemini-2-flash, gemini-3-flash-preview' });
       return;
     }
     next.model = model;
@@ -141,7 +148,7 @@ app.post('/api/config', (req, res) => {
 });
 
 app.post('/api/scan', async (_req, res) => {
-  const filenames = await listSupportedImages(paths.newDir);
+  const filenames = await listSupportedSourceFiles(paths.newDir);
   const pending = new Set(
     (db.prepare('SELECT pending_filename FROM jobs WHERE pending_filename IS NOT NULL').all() as Array<{
       pending_filename: string;
@@ -546,19 +553,23 @@ app.get('/api/csv', async (_req, res) => {
   fs.createReadStream(paths.outputCsvPath).pipe(res);
 });
 
-app.get('/api/images/:filename', (req, res) => {
+function sendStoredFile(req: express.Request, res: express.Response, options?: { imagesOnly?: boolean }): void {
   const filename = req.params.filename;
   const sanitized = path.basename(filename);
   if (sanitized !== filename || filename.includes('..')) {
     res.status(400).json({ error: 'Invalid filename' });
     return;
   }
-  if (!isSupportedImageFile(sanitized)) {
+  const isSupported = options?.imagesOnly ? isSupportedImageFile(sanitized) : isSupportedSourceFile(sanitized);
+  if (!isSupported) {
     res.status(400).json({ error: 'Unsupported file type' });
     return;
   }
 
   res.setHeader('Cache-Control', 'public, max-age=86400');
+  if (!options?.imagesOnly) {
+    res.setHeader('Content-Disposition', 'inline');
+  }
 
   const completedPath = path.join(paths.completedDir, sanitized);
   if (fs.existsSync(completedPath)) {
@@ -570,7 +581,15 @@ app.get('/api/images/:filename', (req, res) => {
     res.sendFile(newPath);
     return;
   }
-  res.status(404).json({ error: 'Image not found' });
+  res.status(404).json({ error: 'File not found' });
+}
+
+app.get('/api/files/:filename', (req, res) => {
+  sendStoredFile(req, res);
+});
+
+app.get('/api/images/:filename', (req, res) => {
+  sendStoredFile(req, res, { imagesOnly: true });
 });
 
 app.get('/api/events', (req, res) => {

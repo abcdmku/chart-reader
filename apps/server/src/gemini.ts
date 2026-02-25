@@ -23,8 +23,9 @@ const ExtractionSchema = z.object({
 });
 
 export async function extractChartRows(args: {
-  image: Buffer;
+  fileData: Buffer;
   mimeType: string;
+  filename?: string;
   model: string;
   abortSignal?: AbortSignal;
 }): Promise<{ result: ExtractionResult; rawResultJson: string }> {
@@ -36,7 +37,7 @@ export async function extractChartRows(args: {
   ].join('\n');
 
   const userPrompt = [
-    'Extract chart table rows from this scanned Billboard page.',
+    'Extract chart table rows from this scanned Billboard page (image or PDF page).',
     '',
     'Output format: a JSON object with `rows` (an array). Each row is one chart entry.',
     '',
@@ -57,6 +58,7 @@ export async function extractChartRows(args: {
     '   - Return ranks as digits only (e.g. "12"), not "12*", "(12)", or "star 12".',
     '3) Text fields (title/artist/label):',
     '   - Copy the printed text from the SAME row of the SAME chart block.',
+    '   - If a record entry title includes multiple songs (for example an LP or multiple songs listed together), keep the full printed title together as ONE `title` value and do not split it into multiple rows or titles.',
     '   - Trim whitespace and remove trailing separator dashes (e.g. "SONG TITLE -" => "SONG TITLE").',
     '   - Ignore decorative bullets/symbols that are not part of the text.',
     '4) Scope: extract ONLY chart table rows. Ignore articles, ads, and sidebars that are not chart tables.',
@@ -69,6 +71,11 @@ export async function extractChartRows(args: {
     '',
     'Return only valid JSON.',
   ].join('\n');
+
+  const sourcePart =
+    args.mimeType === 'application/pdf'
+      ? { type: 'file' as const, data: args.fileData, mediaType: args.mimeType, filename: args.filename }
+      : { type: 'image' as const, image: args.fileData, mediaType: args.mimeType };
 
   const response = await generateText({
     model: google(args.model),
@@ -85,7 +92,7 @@ export async function extractChartRows(args: {
         role: 'user',
         content: [
           { type: 'text', text: userPrompt },
-          { type: 'image', image: args.image, mediaType: args.mimeType },
+          sourcePart,
         ],
       },
     ],
@@ -122,8 +129,9 @@ export async function extractChartRows(args: {
 }
 
 export async function extractMissingChartRows(args: {
-  image: Buffer;
+  fileData: Buffer;
   mimeType: string;
+  filename?: string;
   model: string;
   missing: MissingChartGroup[];
   abortSignal?: AbortSignal;
@@ -144,13 +152,14 @@ export async function extractMissingChartRows(args: {
     .join('\n');
 
   const userPrompt = [
-    'You previously extracted chart table rows from this scanned Billboard page, but some rows were missed. Base their location off of the ranks you can clearly read, and the chart titles/sections they belong to.',
+    'You previously extracted chart table rows from this scanned Billboard page (image or PDF page), but some rows were missed. Base their location off of the ranks you can clearly read, and the chart titles/sections they belong to.',
     '',
     'Task: find the missing rows and output ONLY those missing rows.',
     '',
     'Rules:',
     '- Output ONLY missing rows; do not repeat already-extracted ranks.',
     '- Each output row must include the correct chartTitle and chartSection for its chart block.',
+    '- If a row title lists multiple songs on one record (e.g. LP/medley/multiple songs together), return them as one `title` string for that single row; do not split them.',
     '- Never guess: if you cannot confidently read a missing row, omit it.',
     '',
     'Missing rows to find:',
@@ -158,6 +167,11 @@ export async function extractMissingChartRows(args: {
     '',
     'Return only valid JSON.',
   ].join('\n');
+
+  const sourcePart =
+    args.mimeType === 'application/pdf'
+      ? { type: 'file' as const, data: args.fileData, mediaType: args.mimeType, filename: args.filename }
+      : { type: 'image' as const, image: args.fileData, mediaType: args.mimeType };
 
   const response = await generateText({
     model: google(args.model),
@@ -174,7 +188,7 @@ export async function extractMissingChartRows(args: {
         role: 'user',
         content: [
           { type: 'text', text: userPrompt },
-          { type: 'image', image: args.image, mediaType: args.mimeType },
+          sourcePart,
         ],
       },
     ],

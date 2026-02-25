@@ -16,11 +16,13 @@
   },
   "dependencies": {
     "@ai-sdk/google": "^3.0.30",
+    "@napi-rs/canvas": "^0.1.95",
     "ai": "^6.0.97",
     "express": "^4.19.2",
     "mime-types": "^2.1.35",
     "multer": "^2.0.2",
     "nanoid": "^5.0.7",
+    "pdfjs-dist": "^5.4.624",
     "zod": "^3.24.1"
   },
   "devDependencies": {

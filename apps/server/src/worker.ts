@@ -8,6 +8,7 @@ import { getConfig, withTransaction } from './db.js';
 import { exportCsv } from './csv.js';
 import { makeUniqueFilename } from './files.js';
 import { extractChartRows, extractMissingChartRows } from './gemini.js';
+import { rasterizePdfFirstPageForModel } from './pdfRasterize.js';
 import type { FileLocation, Job } from './types.js';
 import { coerceRank } from './utils/coerceRank.js';
 import type { MissingChartGroup } from './utils/extractionCompleteness.js';
@@ -345,18 +346,42 @@ export class Worker {
       }
 
       const mimeType = mime.lookup(job.filename) || '';
-      if (!mimeType.startsWith('image/')) {
+      const isSupportedMime = mimeType.startsWith('image/') || mimeType === 'application/pdf';
+      if (!isSupportedMime) {
         throw new Error(`Unsupported file type: ${mimeType || 'unknown'}`);
       }
 
       this.throwIfCancelled(job.id, controller.signal);
+      const fileData = await fsp.readFile(filePath);
+      let modelFileData: Buffer = fileData;
+      let modelMimeType = mimeType;
+
+      if (mimeType === 'application/pdf') {
+        this.throwIfCancelled(job.id, controller.signal);
+        this.setProgress(job.id, 'rasterizing_pdf');
+
+        const rasterized = await rasterizePdfFirstPageForModel({
+          fileData,
+          dpi: 300,
+          abortSignal: controller.signal,
+        });
+        modelFileData = rasterized.fileData;
+        modelMimeType = rasterized.mimeType;
+      }
+
+      this.throwIfCancelled(job.id, controller.signal);
       this.setProgress(job.id, 'extracting');
-      const image = await fsp.readFile(filePath);
 
       let finalModel = model;
       let runStatus: RunStatus = 'completed';
       let runError: string | null = null;
-      const initialExtraction = await extractChartRows({ image, mimeType, model, abortSignal: controller.signal });
+      const initialExtraction = await extractChartRows({
+        fileData: modelFileData,
+        mimeType: modelMimeType,
+        filename: job.filename,
+        model,
+        abortSignal: controller.signal,
+      });
       let mergedRows = initialExtraction.result.rows;
 
       const chartGroupOrder: string[] = [];
@@ -479,8 +504,9 @@ export class Worker {
         this.throwIfCancelled(job.id, controller.signal);
         this.setProgress(job.id, 'extracting_missing_ranks');
         const missingExtraction = await extractMissingChartRows({
-          image,
-          mimeType,
+          fileData: modelFileData,
+          mimeType: modelMimeType,
+          filename: job.filename,
           model,
           missing,
           abortSignal: controller.signal,
@@ -503,8 +529,9 @@ export class Worker {
 
           const gemini3Model = 'gemini-3-flash-preview';
           const missingExtractionGemini3 = await extractMissingChartRows({
-            image,
-            mimeType,
+            fileData: modelFileData,
+            mimeType: modelMimeType,
+            filename: job.filename,
             model: gemini3Model,
             missing,
             abortSignal: controller.signal,

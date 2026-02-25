@@ -1,6 +1,6 @@
 # Chart Reader
 
-Digitize scanned Billboard-style chart images into an append-only CSV using Gemini.
+Digitize scanned Billboard-style chart images or PDFs into an append-only CSV using Gemini.
 
 ## Quick start (Docker)
 
@@ -17,10 +17,9 @@ Files are stored in the mounted `./files` folder:
 
 ## Example
 
-1. Start the app (`docker compose up --build`) and open `http://localhost:3000`.
-2. Click `+ Files` and upload a chart image (PNG/JPEG/WebP).
+1. Click `+ Files` and upload a chart image or PDF (PNG/JPEG/WebP/PDF).
    - Tip: include the chart date in the filename (e.g. `1986-04-12_top100.png`) so `entry_date` is set correctly.
-3. When processing finishes, click **Export CSV** (or download from `http://localhost:3000/api/csv`).
+2. When processing finishes, click **Export CSV** (or download from `http://localhost:3000/api/csv`).
 
 ![Chart Reader screenshot](./example.png)
 
@@ -45,4 +44,4 @@ Production-style local run:
 
 ## Filename date rule
 
-The backend reads the chart date from the first `YYYY-MM-DD` found anywhere in the filename (e.g. `1986-04-12_top100.jpg`).
+The backend reads the chart date from the first `YYYY-MM-DD` found anywhere in the filename (e.g. `1986-04-12_top100.jpg` or `1986-04-12_top100.pdf`).

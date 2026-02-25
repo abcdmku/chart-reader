@@ -1,11 +1,12 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { AppState } from '../useAppState';
 import { JobSidebar } from '../components/JobSidebar';
 import { ChartDataTable } from '../components/ChartDataTable';
 import { ImageModal } from '../components/ImageModal';
 import { RunDetailsModal } from '../components/RunDetailsModal';
 
-const MODEL_OPTIONS = ['gemini-2.5-flash', 'gemini-2-flash', 'gemini-3-flash-preview'] as const;
+const ACCEPTED_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'application/pdf']);
+
 type JobSelectModifiers = { shiftKey: boolean; ctrlKey: boolean; metaKey: boolean };
 
 export function Dashboard({ state }: { state: AppState }) {
@@ -13,28 +14,52 @@ export function Dashboard({ state }: { state: AppState }) {
   const [selectionAnchorJobId, setSelectionAnchorJobId] = useState<string | null>(null);
   const [modalImage, setModalImage] = useState<string | null>(null);
   const [runDetailsJobId, setRunDetailsJobId] = useState<string | null>(null);
+  const [dragging, setDragging] = useState(false);
+  const dragCounter = useRef(0);
 
   const {
-    config,
     jobs,
     rowsState,
     latestOnly,
     error,
-    selectedFiles,
-    setSelectedFiles,
     uploading,
-    onUpload,
-    configDraft,
-    onSetConcurrency,
-    onSetModel,
-    onTogglePause,
+    onUploadFiles,
     onSetLatestOnly,
     onSetActiveRun,
   } = state;
 
+  const handleDrop = useCallback(
+    (e: React.DragEvent) => {
+      e.preventDefault();
+      dragCounter.current = 0;
+      setDragging(false);
+      if (uploading) return;
+      const files = Array.from(e.dataTransfer.files).filter(
+        (f) => ACCEPTED_TYPES.has(f.type) || /\.pdf$/i.test(f.name),
+      );
+      if (files.length > 0) void onUploadFiles(files);
+    },
+    [uploading, onUploadFiles],
+  );
+
+  const handleDragEnter = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    dragCounter.current += 1;
+    if (dragCounter.current === 1) setDragging(true);
+  }, []);
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    dragCounter.current -= 1;
+    if (dragCounter.current === 0) setDragging(false);
+  }, []);
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+  }, []);
+
   const rows = rowsState?.rows ?? [];
   const totalRows = rowsState?.total ?? 0;
-  const draftModel = configDraft?.model ?? config?.model ?? MODEL_OPTIONS[0];
   const sortedJobs = useMemo(
     () => jobs.slice().sort((a, b) => b.created_at.localeCompare(a.created_at)),
     [jobs],
@@ -60,7 +85,7 @@ export function Dashboard({ state }: { state: AppState }) {
   const filteredTotalRows = selectedJobIds.length === 0 ? totalRows : filteredRows.length;
 
   // List of filenames for modal navigation (sorted same as sidebar)
-  const imageFilenames = useMemo(
+  const previewFilenames = useMemo(
     () =>
       sortedJobs
         .filter((j) => j.file_location !== 'missing')
@@ -120,81 +145,21 @@ export function Dashboard({ state }: { state: AppState }) {
   }
 
   return (
-    <div className="flex h-screen flex-col">
-      {/* Top bar: upload + queue controls */}
-      <header className="flex items-center justify-between border-b border-zinc-800 bg-zinc-900 px-4 py-2">
-        <div className="flex items-center gap-2">
-          <h1 className="mr-2 text-sm font-semibold text-zinc-200">Chart Reader</h1>
-          <label className="cursor-pointer rounded border border-zinc-700 px-3 py-1.5 text-xs text-zinc-300 hover:border-zinc-500 focus-within:border-zinc-500">
-            + Files
-            <input
-              type="file"
-              multiple
-              accept="image/png,image/jpeg,image/webp"
-              className="sr-only"
-              onChange={(e) => setSelectedFiles(Array.from(e.target.files ?? []))}
-            />
-          </label>
-          {selectedFiles.length > 0 ? (
-            <button
-              onClick={onUpload}
-              disabled={uploading}
-              className="rounded bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500 disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-zinc-400"
-            >
-              {uploading ? 'Uploading…' : `Upload (${selectedFiles.length})`}
-            </button>
-          ) : null}
-        </div>
-
-        <div className="flex items-center gap-3">
-          <button
-            onClick={onTogglePause}
-            disabled={!config}
-            className={`rounded px-3 py-1.5 text-xs font-medium focus-visible:outline focus-visible:outline-2 focus-visible:outline-zinc-400 disabled:opacity-40 ${
-              config?.paused
-                ? 'bg-emerald-600 text-white hover:bg-emerald-500'
-                : 'border border-zinc-700 text-zinc-400 hover:border-zinc-500'
-            }`}
-          >
-            {config?.paused ? 'Resume' : 'Pause'}
-          </button>
-
-          <div className="flex items-center gap-1.5">
-            <label className="text-xs text-zinc-600" htmlFor="dash-concurrency">
-              workers
-            </label>
-            <input
-              id="dash-concurrency"
-              type="number"
-              min={1}
-              max={10}
-              value={configDraft?.concurrency ?? 2}
-              onChange={(e) => {
-                const value = e.currentTarget.valueAsNumber;
-                if (!Number.isFinite(value)) return;
-                void onSetConcurrency(value);
-              }}
-              className="w-12 rounded border border-zinc-800 bg-zinc-950 px-2 py-1 text-xs text-zinc-100 outline-none focus-visible:border-zinc-600"
-            />
-            <label className="sr-only" htmlFor="dash-model">
-              Model
-            </label>
-            <select
-              id="dash-model"
-              value={draftModel}
-              onChange={(e) => void onSetModel(e.currentTarget.value)}
-              className="max-w-40 rounded border border-zinc-800 bg-zinc-950 px-2 py-1 text-xs text-zinc-100 outline-none focus-visible:border-zinc-600"
-            >
-              {MODEL_OPTIONS.map((model) => (
-                <option key={model} value={model}>
-                  {model}
-                </option>
-              ))}
-            </select>
+    <div
+      className="relative flex h-screen flex-col"
+      onDragEnter={handleDragEnter}
+      onDragLeave={handleDragLeave}
+      onDragOver={handleDragOver}
+      onDrop={handleDrop}
+    >
+      {/* Drop overlay */}
+      {dragging ? (
+        <div className="pointer-events-none absolute inset-0 z-50 flex items-center justify-center bg-zinc-950/80 backdrop-blur-sm">
+          <div className="rounded-xl border-2 border-dashed border-emerald-500/60 px-12 py-8 text-sm font-medium text-emerald-400">
+            Drop files to upload
           </div>
-
         </div>
-      </header>
+      ) : null}
 
       {error ? (
         <div
@@ -228,7 +193,7 @@ export function Dashboard({ state }: { state: AppState }) {
       {/* Fullscreen image modal */}
       <ImageModal
         filename={modalImage}
-        filenames={imageFilenames}
+        filenames={previewFilenames}
         onClose={() => setModalImage(null)}
         onNavigate={setModalImage}
       />

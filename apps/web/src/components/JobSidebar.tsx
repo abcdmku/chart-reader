@@ -25,9 +25,14 @@ function chartLabel(filename: string): string {
     .replace(/_/g, ' ');
 }
 
+function isPdfFilename(filename: string): boolean {
+  return /\.pdf$/i.test(filename);
+}
+
 const STEP_LABELS: Record<string, string> = {
   starting: 'Starting',
   validating_file: 'Validating',
+  rasterizing_pdf: 'Rasterizing PDF (300 DPI)',
   extracting: 'Extracting',
   validating_extraction: 'Checking rows',
   extracting_missing_ranks: 'Re-extracting missing rows',
@@ -115,6 +120,8 @@ function JobProgressBar({ job, avgDurationMs }: { job: Job; avgDurationMs: numbe
   );
 }
 
+const MODEL_OPTIONS = ['gemini-2.5-flash', 'gemini-2-flash', 'gemini-3-flash-preview'] as const;
+
 type JobSidebarProps = {
   state: AppState;
   selectedJobIds: string[];
@@ -135,8 +142,9 @@ export function JobSidebar({
   onOpenRunDetails,
   onImageClick,
 }: JobSidebarProps) {
-  const { config, jobs, avgDurationMs, rowsState, onTogglePause, onRerun, onStop, onDelete } = state;
+  const { config, jobs, avgDurationMs, rowsState, uploading, onUploadFiles, configDraft, onSetConcurrency, onSetModel, onTogglePause, onRerun, onStop, onDelete } = state;
 
+  const draftModel = configDraft?.model ?? config?.model ?? MODEL_OPTIONS[0];
   const sortedJobs = useMemo(
     () => jobs.slice().sort((a, b) => b.created_at.localeCompare(a.created_at)),
     [jobs],
@@ -147,28 +155,80 @@ export function JobSidebar({
 
   return (
     <aside className="flex w-72 shrink-0 flex-col border-r border-zinc-800 bg-zinc-950">
-      {/* Queue controls */}
-      <div className="border-b border-zinc-800 px-4 py-3">
-        <div className="flex items-center justify-between">
-          <span className="text-xs font-semibold text-zinc-300">
-            Jobs
-            <span className="ml-1.5 font-normal text-zinc-600">{sortedJobs.length}</span>
-          </span>
-          <button
-            onClick={onTogglePause}
-            disabled={!config}
-            className={`rounded px-2.5 py-1 text-xs font-medium focus-visible:outline focus-visible:outline-2 focus-visible:outline-zinc-400 disabled:opacity-40 ${
-              config?.paused
-                ? 'bg-emerald-600 text-white hover:bg-emerald-500'
-                : 'border border-zinc-700 text-zinc-400 hover:border-zinc-500'
-            }`}
-          >
-            {config?.paused ? 'Resume' : 'Pause'}
-          </button>
+      {/* Upload */}
+      <div className="px-3 pt-3 pb-2">
+        <label className={`flex w-full cursor-pointer items-center justify-center rounded-lg border border-dashed px-3 py-2 text-xs transition-colors focus-within:border-zinc-500 ${
+          uploading
+            ? 'border-zinc-800 text-zinc-600 pointer-events-none'
+            : 'border-zinc-700 text-zinc-400 hover:border-zinc-500 hover:text-zinc-300'
+        }`}>
+          {uploading ? 'Uploading…' : '+ Add files'}
+          <input
+            type="file"
+            multiple
+            accept="image/png,image/jpeg,image/webp,application/pdf,.pdf"
+            className="sr-only"
+            disabled={uploading}
+            onChange={(e) => {
+              const files = Array.from(e.target.files ?? []);
+              e.target.value = '';
+              if (files.length > 0) void onUploadFiles(files);
+            }}
+          />
+        </label>
+      </div>
+
+      {/* Config bar */}
+      <div className="flex items-center gap-2 border-b border-zinc-800 px-3 pb-3">
+        <select
+          id="sidebar-model"
+          value={draftModel}
+          onChange={(e) => void onSetModel(e.currentTarget.value)}
+          className="min-w-0 flex-[0.85] rounded border border-zinc-800 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-300 outline-none focus-visible:border-zinc-600"
+        >
+          {MODEL_OPTIONS.map((model) => (
+            <option key={model} value={model}>
+              {model}
+            </option>
+          ))}
+        </select>
+        <div className="flex items-center gap-1">
+          <input
+            id="sidebar-concurrency"
+            type="number"
+            min={1}
+            max={64}
+            value={configDraft?.concurrency ?? 2}
+            onChange={(e) => {
+              const value = e.currentTarget.valueAsNumber;
+              if (!Number.isFinite(value)) return;
+              void onSetConcurrency(value);
+            }}
+            title="Workers"
+            className="w-12 rounded border border-zinc-800 bg-zinc-900 px-1.5 py-1.5 text-center text-xs text-zinc-300 outline-none focus-visible:border-zinc-600"
+          />
+          <span className="text-[10px] text-zinc-600">w</span>
         </div>
-        <div className="mt-1.5 text-xs text-zinc-600">
-          {config?.paused ? 'Paused' : 'Running'} · {config?.model ?? '—'}
-        </div>
+        <button
+          onClick={onTogglePause}
+          disabled={!config}
+          title={config?.paused ? 'Resume' : 'Pause'}
+          className={`shrink-0 rounded p-1.5 text-xs focus-visible:outline focus-visible:outline-2 focus-visible:outline-zinc-400 disabled:opacity-40 ${
+            config?.paused
+              ? 'bg-emerald-600 text-white hover:bg-emerald-500'
+              : 'border border-zinc-800 text-zinc-500 hover:border-zinc-600 hover:text-zinc-300'
+          }`}
+        >
+          {config?.paused ? '▶' : '❚❚'}
+        </button>
+      </div>
+
+      {/* Jobs heading */}
+      <div className="flex items-center justify-between px-3 py-2">
+        <span className="text-[10px] font-medium uppercase tracking-wider text-zinc-600">
+          Jobs
+          <span className="ml-1.5 text-zinc-700">{sortedJobs.length}</span>
+        </span>
       </div>
 
       {/* Job list */}
@@ -244,6 +304,7 @@ function JobItem({
   const disableDelete = job.status === 'processing' || job.status === 'deleted';
   const showStop = job.status === 'processing';
   const displayFilename = job.canonical_filename || job.filename;
+  const isPdf = isPdfFilename(job.filename);
 
   return (
     <div
@@ -283,17 +344,24 @@ function JobItem({
             onImageClick();
           }
         }}
-        aria-label={`View image: ${job.filename}`}
+        aria-label={`View file: ${job.filename}`}
       >
         {job.file_location !== 'missing' ? (
-          <img
-            src={`/api/images/${encodeURIComponent(job.filename)}`}
-            alt={job.filename}
-            className="h-full w-full object-cover"
-            loading="lazy"
-            width={40}
-            height={48}
-          />
+          isPdf ? (
+            <div className="relative flex h-full w-full items-center justify-center bg-gradient-to-b from-rose-950/70 to-zinc-950 text-[10px] font-semibold text-rose-200">
+              PDF
+              <div className="absolute inset-x-0 top-0 h-2 bg-rose-500/60" aria-hidden="true" />
+            </div>
+          ) : (
+            <img
+              src={`/api/files/${encodeURIComponent(job.filename)}`}
+              alt={job.filename}
+              className="h-full w-full object-cover"
+              loading="lazy"
+              width={40}
+              height={48}
+            />
+          )
         ) : (
           <div className="flex h-full w-full items-center justify-center text-zinc-700 text-xs">
             ?
