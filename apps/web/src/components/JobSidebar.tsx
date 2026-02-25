@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import type { AppState } from '../useAppState';
 import type { Job, JobStatus } from '../types';
+import { pdfThumbnailFilename } from '../utils/pdfPreviewFiles';
 
 function statusDotClass(status: JobStatus): string {
   switch (status) {
@@ -32,7 +33,7 @@ function isPdfFilename(filename: string): boolean {
 const STEP_LABELS: Record<string, string> = {
   starting: 'Starting',
   validating_file: 'Validating',
-  rasterizing_pdf: 'Rasterizing PDF (300 DPI)',
+  rasterizing_pdf: 'Selecting page + rasterizing PDF',
   extracting: 'Extracting',
   validating_extraction: 'Checking rows',
   extracting_missing_ranks: 'Re-extracting missing rows',
@@ -348,9 +349,25 @@ function JobItem({
       >
         {job.file_location !== 'missing' ? (
           isPdf ? (
-            <div className="relative flex h-full w-full items-center justify-center bg-gradient-to-b from-rose-950/70 to-zinc-950 text-[10px] font-semibold text-rose-200">
-              PDF
-              <div className="absolute inset-x-0 top-0 h-2 bg-rose-500/60" aria-hidden="true" />
+            <div className="relative h-full w-full bg-gradient-to-b from-rose-950/70 to-zinc-950">
+              <div className="absolute inset-0 flex items-center justify-center text-[10px] font-semibold text-rose-200">
+                PDF
+              </div>
+              <img
+                src={`/api/images/${encodeURIComponent(pdfThumbnailFilename(job.filename))}`}
+                alt={`${job.filename} (PDF thumbnail)`}
+                className="h-full w-full object-cover"
+                loading="lazy"
+                width={40}
+                height={48}
+                onError={(e) => {
+                  // If the derived thumbnail isn't available yet, keep the PDF fallback tile.
+                  e.currentTarget.style.display = 'none';
+                }}
+              />
+              <div className="absolute left-1 top-1 rounded bg-rose-500/70 px-1 py-0.5 text-[9px] font-bold leading-none text-white">
+                PDF
+              </div>
             </div>
           ) : (
             <img

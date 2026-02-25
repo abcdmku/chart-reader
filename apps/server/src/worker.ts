@@ -8,9 +8,11 @@ import { getConfig, withTransaction } from './db.js';
 import { exportCsv } from './csv.js';
 import { makeUniqueFilename } from './files.js';
 import { extractChartRows, extractMissingChartRows } from './gemini.js';
-import { rasterizePdfFirstPageForModel } from './pdfRasterize.js';
+import { rasterizePdfChartPageCandidatesForModel } from './pdfRasterize.js';
+import { pdfRasterPreviewFilename, pdfThumbnailFilename } from './pdfPreviewFiles.js';
 import type { FileLocation, Job } from './types.js';
 import { coerceRank } from './utils/coerceRank.js';
+import { filterRowsToDiscoDanceCharts } from './utils/discoDance.js';
 import type { MissingChartGroup } from './utils/extractionCompleteness.js';
 import { findMissingChartGroups, formatRankRanges } from './utils/extractionCompleteness.js';
 import { parseEntryDate } from './utils/parseEntryDate.js';
@@ -352,39 +354,124 @@ export class Worker {
       }
 
       this.throwIfCancelled(job.id, controller.signal);
-      let modelFileData: Buffer;
+      let modelFileData: Buffer | null = null;
       let modelMimeType = mimeType;
+      let pdfPreviewFiles: { raster: string; thumb: string } | null = null;
+
+      type InitialExtraction = Awaited<ReturnType<typeof extractChartRows>>;
+      let initialExtraction: InitialExtraction | null = null;
+      let mergedRows: InitialExtraction['result']['rows'] = [];
 
       if (mimeType === 'application/pdf') {
         const pdfFileData = await fsp.readFile(filePath);
         this.throwIfCancelled(job.id, controller.signal);
         this.setProgress(job.id, 'rasterizing_pdf');
 
-        const rasterized = await rasterizePdfFirstPageForModel({
+        const rasterDpi = Number(process.env.PDF_RASTER_DPI ?? process.env.PDF_MODEL_DPI ?? 300) || 300;
+        const maxPagesToScan = Number(process.env.PDF_MAX_PAGES_TO_SCAN ?? 120) || 120;
+        const candidateLimit = Number(process.env.PDF_PAGE_CANDIDATES ?? 12) || 12;
+
+        const attemptedPages: Array<{ pageNumber: number; charts: string[] }> = [];
+
+        for await (const candidate of rasterizePdfChartPageCandidatesForModel({
           fileData: pdfFileData,
-          dpi: 300,
+          dpi: rasterDpi,
           abortSignal: controller.signal,
-        });
-        modelFileData = rasterized.fileData;
-        modelMimeType = rasterized.mimeType;
+          maxPagesToScan,
+          candidateLimit,
+        })) {
+          this.throwIfCancelled(job.id, controller.signal);
+
+          const rasterExt = candidate.model.mimeType === 'image/webp' ? 'webp' : 'jpg';
+          const otherRasterExt = rasterExt === 'webp' ? 'jpg' : 'webp';
+          pdfPreviewFiles = {
+            raster: pdfRasterPreviewFilename(job.filename, rasterExt),
+            thumb: pdfThumbnailFilename(job.filename),
+          };
+
+          // Save the raster immediately so the user can view exactly what the model will see,
+          // even while extraction is still running.
+          await Promise.all([
+            fsp.rm(path.join(this.paths.completedDir, pdfRasterPreviewFilename(job.filename, otherRasterExt)), {
+              force: true,
+            }).catch(() => undefined),
+            fsp.writeFile(path.join(this.paths.completedDir, pdfPreviewFiles.raster), candidate.model.fileData),
+            fsp.writeFile(path.join(this.paths.completedDir, pdfPreviewFiles.thumb), candidate.thumbnailJpeg.fileData),
+          ]);
+
+          this.setProgress(job.id, 'extracting');
+
+          const extraction = await extractChartRows({
+            fileData: candidate.model.fileData,
+            mimeType: candidate.model.mimeType,
+            filename: job.filename,
+            model,
+            abortSignal: controller.signal,
+          });
+
+          const discoDance = filterRowsToDiscoDanceCharts(extraction.result.rows);
+          if (discoDance.mode !== 'none') {
+            initialExtraction = extraction;
+            mergedRows = discoDance.rows;
+            modelFileData = candidate.model.fileData;
+            modelMimeType = candidate.model.mimeType;
+            break;
+          }
+
+          const foundCharts = Array.from(
+            new Set(
+              extraction.result.rows.map((r) =>
+                `${r.chartTitle || '(unknown chart)'}${r.chartSection ? ` [${r.chartSection}]` : ''}`,
+              ),
+            ),
+          );
+          attemptedPages.push({ pageNumber: candidate.model.pageNumber, charts: foundCharts.slice(0, 4) });
+        }
+
+        if (!initialExtraction || modelFileData == null) {
+          const preview = attemptedPages
+            .slice(0, 6)
+            .map((p) => `p${p.pageNumber}: ${p.charts.join(', ') || '(no charts found)'}`)
+            .join('; ');
+          throw new Error(
+            `No DISCO/DANCE chart found in the PDF after scanning ${maxPagesToScan} pages and trying ${attemptedPages.length} candidate page(s).${preview ? ` Found: ${preview}${attemptedPages.length > 6 ? 'â€¦' : ''}` : ''}`,
+          );
+        }
       } else {
         modelFileData = await fsp.readFile(filePath);
       }
 
       this.throwIfCancelled(job.id, controller.signal);
-      this.setProgress(job.id, 'extracting');
+      if (!initialExtraction) this.setProgress(job.id, 'extracting');
 
       let finalModel = model;
       let runStatus: RunStatus = 'completed';
       let runError: string | null = null;
-      const initialExtraction = await extractChartRows({
+      if (modelFileData == null) throw new Error('Failed to read file');
+      initialExtraction ??= await extractChartRows({
         fileData: modelFileData,
         mimeType: modelMimeType,
         filename: job.filename,
         model,
         abortSignal: controller.signal,
       });
-      let mergedRows = initialExtraction.result.rows;
+      if (mergedRows.length === 0) mergedRows = initialExtraction!.result.rows;
+
+      const discoDance = filterRowsToDiscoDanceCharts(mergedRows);
+      if (discoDance.mode === 'none') {
+        const foundCharts = Array.from(
+          new Set(
+            mergedRows.map((r) =>
+              `${r.chartTitle || '(unknown chart)'}${r.chartSection ? ` [${r.chartSection}]` : ''}`,
+            ),
+          ),
+        );
+        const preview = foundCharts.slice(0, 6).join('; ');
+        throw new Error(
+          `No DISCO/DANCE chart found on the selected page.${preview ? ` Found: ${preview}${foundCharts.length > 6 ? '…' : ''}` : ''}`,
+        );
+      }
+      mergedRows = discoDance.rows;
 
       const chartGroupOrder: string[] = [];
       {
@@ -664,6 +751,35 @@ export class Worker {
 
         await moveFile(pathNew, destPath);
         finalLocation = 'completed';
+
+        if (pdfPreviewFiles && finalFilename !== job.filename) {
+          const oldRasterPath = path.join(this.paths.completedDir, pdfPreviewFiles.raster);
+          const oldThumbPath = path.join(this.paths.completedDir, pdfPreviewFiles.thumb);
+
+          const rasterExt = path.extname(pdfPreviewFiles.raster).toLowerCase() === '.jpg' ? 'jpg' : 'webp';
+          const nextRasterName = pdfRasterPreviewFilename(finalFilename, rasterExt);
+          const nextThumbName = pdfThumbnailFilename(finalFilename);
+
+          const nextRasterPath = path.join(this.paths.completedDir, nextRasterName);
+          const nextThumbPath = path.join(this.paths.completedDir, nextThumbName);
+
+          await Promise.all([
+            fsp.rm(nextRasterPath, { force: true }).catch(() => undefined),
+            fsp.rm(nextThumbPath, { force: true }).catch(() => undefined),
+          ]);
+
+          const [hasRaster, hasThumb] = await Promise.all([
+            fileExists(oldRasterPath),
+            fileExists(oldThumbPath),
+          ]);
+
+          await Promise.all([
+            hasRaster ? moveFile(oldRasterPath, nextRasterPath) : Promise.resolve(),
+            hasThumb ? moveFile(oldThumbPath, nextThumbPath) : Promise.resolve(),
+          ]);
+
+          pdfPreviewFiles = { raster: nextRasterName, thumb: nextThumbName };
+        }
 
         if (finalFilename !== job.filename) {
           this.db.prepare('UPDATE chart_rows SET source_file = ? WHERE run_id = ?').run(finalFilename, runId);

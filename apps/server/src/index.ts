@@ -15,6 +15,7 @@ import {
   makeUniqueFilename,
   sanitizeFilename,
 } from './files.js';
+import { pdfRasterPreviewCandidateFilenames, pdfThumbnailFilename } from './pdfPreviewFiles.js';
 import { ensureDirectories, getPaths } from './paths.js';
 import { SseHub } from './sse.js';
 import type { Config, Job } from './types.js';
@@ -461,9 +462,16 @@ app.delete('/api/jobs/:id', async (req, res) => {
 
   const pathNew = path.join(paths.newDir, job.filename);
   const pathCompleted = path.join(paths.completedDir, job.filename);
+  const isPdf = /\.pdf$/i.test(job.filename);
+  const previewRasterPaths = isPdf
+    ? pdfRasterPreviewCandidateFilenames(job.filename).map((name) => path.join(paths.completedDir, name))
+    : [];
+  const previewThumbPath = isPdf ? path.join(paths.completedDir, pdfThumbnailFilename(job.filename)) : null;
   await Promise.all([
     fsp.rm(pathNew, { force: true }).catch(() => {}),
     fsp.rm(pathCompleted, { force: true }).catch(() => {}),
+    ...previewRasterPaths.map((p) => fsp.rm(p, { force: true }).catch(() => {})),
+    previewThumbPath ? fsp.rm(previewThumbPath, { force: true }).catch(() => {}) : Promise.resolve(),
   ]);
 
   const now = new Date().toISOString();
@@ -566,7 +574,9 @@ function sendStoredFile(req: express.Request, res: express.Response, options?: {
     return;
   }
 
-  res.setHeader('Cache-Control', 'public, max-age=86400');
+  // These files (especially PDF preview rasters) can be overwritten on reruns while keeping the same filename.
+  // Avoid client-side caching so the UI always shows the latest image bytes.
+  res.setHeader('Cache-Control', options?.imagesOnly ? 'no-store' : 'public, max-age=86400');
   if (!options?.imagesOnly) {
     res.setHeader('Content-Disposition', 'inline');
   }

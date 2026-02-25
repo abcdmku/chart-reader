@@ -12,6 +12,7 @@
     "db:studio": "drizzle-kit studio --config=drizzle.config.ts --host 127.0.0.1",
     "db:introspect": "drizzle-kit introspect --config=drizzle.config.ts",
     "csv:rebuild": "tsx scripts/rebuild-csv.ts",
+    "pdf:previews": "tsx scripts/backfill-pdf-previews.ts",
     "test": "vitest run"
   },
   "dependencies": {

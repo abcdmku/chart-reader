@@ -1,5 +1,6 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { useHotkeys } from 'react-hotkeys-hook';
+import { pdfRasterPreviewCandidateFilenames } from '../utils/pdfPreviewFiles';
 
 type ImageModalProps = {
   filename: string | null;
@@ -14,6 +15,11 @@ function isPdfFilename(filename: string): boolean {
 
 export function ImageModal({ filename, filenames, onClose, onNavigate }: ImageModalProps) {
   const currentIndex = filename ? filenames.indexOf(filename) : -1;
+  const [pdfMode, setPdfMode] = useState<'raster' | 'pdf'>('raster');
+  const [rasterCandidateIndex, setRasterCandidateIndex] = useState(0);
+  const [rasterCacheBust, setRasterCacheBust] = useState<number>(() => Date.now());
+
+  const isPdf = filename != null && isPdfFilename(filename);
 
   useHotkeys('escape', onClose, { enabled: !!filename });
 
@@ -35,11 +41,28 @@ export function ImageModal({ filename, filenames, onClose, onNavigate }: ImageMo
     [currentIndex, filenames, onNavigate],
   );
 
+  useEffect(() => {
+    // Always reset when the active filename changes so the hook order stays stable
+    // across "closed" (null) and "open" renders.
+    if (!filename) {
+      setPdfMode('raster');
+      setRasterCandidateIndex(0);
+      setRasterCacheBust(Date.now());
+      return;
+    }
+    if (!isPdf) return;
+    setPdfMode('raster');
+    setRasterCandidateIndex(0);
+    setRasterCacheBust(Date.now());
+  }, [filename, isPdf]);
+
   if (!filename) return null;
 
-  const isPdf = isPdfFilename(filename);
   const fileUrl = `/api/files/${encodeURIComponent(filename)}`;
   const pdfViewerUrl = `${fileUrl}#toolbar=1&navpanes=0&view=FitH`;
+  const rasterCandidates = isPdf ? pdfRasterPreviewCandidateFilenames(filename) : [];
+  const rasterFilename = rasterCandidates[rasterCandidateIndex] ?? rasterCandidates[0];
+  const rasterUrl = rasterFilename ? `/api/images/${encodeURIComponent(rasterFilename)}?v=${rasterCacheBust}` : '';
 
   return (
     <div
@@ -84,17 +107,61 @@ export function ImageModal({ filename, filenames, onClose, onNavigate }: ImageMo
       ) : null}
 
       <div
-        className={`overflow-hidden rounded-lg shadow-2xl ${
-          isPdf ? 'h-[90vh] w-[90vw] max-w-6xl bg-zinc-950' : ''
-        }`}
+        className={`overflow-hidden rounded-lg shadow-2xl ${isPdf ? 'flex h-[90vh] w-[90vw] max-w-6xl flex-col bg-zinc-950' : ''}`}
         onClick={(e) => e.stopPropagation()}
       >
         {isPdf ? (
-          <iframe
-            src={pdfViewerUrl}
-            title={filename}
-            className="h-full w-full border-0 bg-white"
-          />
+          <>
+            <div className="flex items-center gap-2 border-b border-zinc-800 bg-zinc-950/60 px-3 py-2 text-xs text-zinc-300">
+              <button
+                type="button"
+                onClick={() => setPdfMode('raster')}
+                className={`rounded px-2 py-1 font-medium ${
+                  pdfMode === 'raster'
+                    ? 'bg-zinc-200 text-zinc-950'
+                    : 'bg-zinc-900/60 text-zinc-300 hover:bg-zinc-800'
+                }`}
+              >
+                Raster
+              </button>
+              <button
+                type="button"
+                onClick={() => setPdfMode('pdf')}
+                className={`rounded px-2 py-1 font-medium ${
+                  pdfMode === 'pdf'
+                    ? 'bg-zinc-200 text-zinc-950'
+                    : 'bg-zinc-900/60 text-zinc-300 hover:bg-zinc-800'
+                }`}
+              >
+                PDF
+              </button>
+              <span className="ml-auto text-[10px] text-zinc-500">
+                {pdfMode === 'pdf' ? 'Embedded viewer' : 'Model input raster'}
+              </span>
+            </div>
+            <div className="flex-1 bg-black">
+              {pdfMode === 'pdf' ? (
+                <iframe
+                  src={pdfViewerUrl}
+                  title={filename}
+                  className="h-full w-full border-0 bg-white"
+                />
+              ) : (
+                <img
+                  src={rasterUrl}
+                  alt={`${filename} (rasterized PDF page)`}
+                  className="h-full w-full object-contain"
+                  onError={() => {
+                    if (rasterCandidateIndex < rasterCandidates.length - 1) {
+                      setRasterCandidateIndex((prev) => prev + 1);
+                      return;
+                    }
+                    setPdfMode('pdf');
+                  }}
+                />
+              )}
+            </div>
+          </>
         ) : (
           <img
             src={fileUrl}
