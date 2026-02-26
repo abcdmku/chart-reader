@@ -370,6 +370,17 @@ export function PdfReviewModal({ job, onClose, onSetPdfPage }: PdfReviewModalPro
     }
   };
 
+  useHotkeys(
+    'enter',
+    (e) => {
+      e.preventDefault();
+      if (isSubmitting || !job) return;
+      void submitPage(previewSafe);
+    },
+    { enabled: !!job && !isSubmitting },
+    [job?.id, isSubmitting, previewSafe],
+  );
+
   const handleManualSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     const page = Number(manualValue);

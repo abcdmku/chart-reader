@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import multer from 'multer';
 import { nanoid } from 'nanoid';
 import { exportCsv } from './csv.js';
-import { getConfig, listJobs, openDb, updateConfig } from './db.js';
+import { getConfig, listJobs, openDb, updateConfig, withTransaction } from './db.js';
 import {
   isSupportedImageFile,
   isSupportedSourceFile,
@@ -500,8 +500,81 @@ app.get('/api/jobs/:id/run', (req, res) => {
   res.json({ job, run: run ?? null, runs });
 });
 
+function parseTruthyFlag(value: unknown): boolean {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value === 1;
+  if (typeof value !== 'string') return false;
+  const normalized = value.trim().toLowerCase();
+  return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on';
+}
+
+function parseDeleteCsvDataFlag(req: express.Request): boolean {
+  const queryRaw = req.query.delete_csv_data ?? req.query.deleteCsvData;
+  const queryValue = Array.isArray(queryRaw) ? queryRaw[0] : queryRaw;
+
+  const body = (req.body ?? {}) as { delete_csv_data?: unknown; deleteCsvData?: unknown };
+  const bodyValue = body.delete_csv_data ?? body.deleteCsvData;
+
+  return parseTruthyFlag(queryValue) || parseTruthyFlag(bodyValue);
+}
+
+async function removeJobArtifacts(job: Job): Promise<void> {
+  const pathsToDelete = new Set<string>();
+
+  pathsToDelete.add(path.join(paths.newDir, job.filename));
+  pathsToDelete.add(path.join(paths.completedDir, job.filename));
+
+  if (job.pending_filename) {
+    pathsToDelete.add(path.join(paths.newDir, job.pending_filename));
+    pathsToDelete.add(path.join(paths.completedDir, job.pending_filename));
+  }
+
+  if (/\.pdf$/i.test(job.filename)) {
+    for (const name of pdfRasterPreviewCandidateFilenames(job.filename)) {
+      pathsToDelete.add(path.join(paths.completedDir, name));
+    }
+    pathsToDelete.add(path.join(paths.completedDir, pdfThumbnailFilename(job.filename)));
+  }
+
+  await Promise.all(
+    Array.from(pathsToDelete, (filePath) =>
+      fsp.rm(filePath, { force: true }).catch(() => {}),
+    ),
+  );
+}
+
+app.delete('/api/jobs', async (req, res) => {
+  const processingCount = (
+    db.prepare("SELECT COUNT(*) AS count FROM jobs WHERE status = 'processing'").get() as { count: number } | undefined
+  )?.count ?? 0;
+  if (processingCount > 0) {
+    res.status(409).json({ error: 'cannot delete all jobs while jobs are processing' });
+    return;
+  }
+
+  const deleteCsvData = parseDeleteCsvDataFlag(req);
+  const allJobs = db.prepare('SELECT * FROM jobs').all() as Job[];
+  await Promise.all(allJobs.map((job) => removeJobArtifacts(job)));
+
+  const now = new Date().toISOString();
+  const result = withTransaction(db, () => {
+    if (deleteCsvData) {
+      db.prepare('DELETE FROM chart_rows WHERE job_id IN (SELECT id FROM jobs)').run();
+    }
+    db.prepare('DELETE FROM runs WHERE job_id IN (SELECT id FROM jobs)').run();
+
+    const deleted = db.prepare('DELETE FROM jobs').run();
+    return deleted.changes;
+  });
+
+  sse.send('csv_updated', { updatedAt: now });
+  sse.send('state', buildState());
+  res.json({ ok: true, deleted: result, delete_csv_data: deleteCsvData });
+});
+
 app.delete('/api/jobs/:id', async (req, res) => {
   const jobId = req.params.id;
+  const deleteCsvData = parseDeleteCsvDataFlag(req);
   const job = db.prepare('SELECT * FROM jobs WHERE id = ?').get(jobId) as Job | undefined;
   if (!job) {
     res.status(404).json({ error: 'job not found' });
@@ -512,34 +585,21 @@ app.delete('/api/jobs/:id', async (req, res) => {
     return;
   }
 
-  const pathNew = path.join(paths.newDir, job.filename);
-  const pathCompleted = path.join(paths.completedDir, job.filename);
-  const isPdf = /\.pdf$/i.test(job.filename);
-  const previewRasterPaths = isPdf
-    ? pdfRasterPreviewCandidateFilenames(job.filename).map((name) => path.join(paths.completedDir, name))
-    : [];
-  const previewThumbPath = isPdf ? path.join(paths.completedDir, pdfThumbnailFilename(job.filename)) : null;
-  await Promise.all([
-    fsp.rm(pathNew, { force: true }).catch(() => {}),
-    fsp.rm(pathCompleted, { force: true }).catch(() => {}),
-    ...previewRasterPaths.map((p) => fsp.rm(p, { force: true }).catch(() => {})),
-    previewThumbPath ? fsp.rm(previewThumbPath, { force: true }).catch(() => {}) : Promise.resolve(),
-  ]);
+  await removeJobArtifacts(job);
 
   const now = new Date().toISOString();
-  db.prepare(
-    `UPDATE jobs
-     SET status = 'deleted',
-         progress_step = NULL,
-         error = NULL,
-         finished_at = ?,
-         file_location = 'missing'
-     WHERE id = ?`,
-  ).run(now, jobId);
+  withTransaction(db, () => {
+    if (deleteCsvData) {
+      db.prepare('DELETE FROM chart_rows WHERE job_id = ?').run(jobId);
+    }
+    db.prepare('DELETE FROM runs WHERE job_id = ?').run(jobId);
 
-  const updated = db.prepare('SELECT * FROM jobs WHERE id = ?').get(jobId) as Job;
-  sse.send('job', updated);
-  res.json({ ok: true });
+    db.prepare('DELETE FROM jobs WHERE id = ?').run(jobId);
+  });
+
+  sse.send('csv_updated', { updatedAt: now });
+  sse.send('state', buildState());
+  res.json({ ok: true, delete_csv_data: deleteCsvData });
 });
 
 app.get('/api/rows', (req, res) => {

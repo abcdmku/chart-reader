@@ -319,7 +319,7 @@ export async function scanPdfChartPageCandidatesForModel(args: {
   maxPagesToScan?: number;
   candidateLimit?: number;
 }): Promise<PdfPageCandidateScanResult> {
-  const maxPagesToScan = Math.max(1, args.maxPagesToScan ?? 300);
+  const maxPagesToScan = Number.isFinite(args.maxPagesToScan) ? Math.max(1, Math.floor(args.maxPagesToScan!)) : null;
   const candidateLimit = Math.max(1, args.candidateLimit ?? 12);
   throwIfAborted(args.abortSignal);
 
@@ -348,7 +348,7 @@ export async function scanPdfChartPageCandidatesForModel(args: {
         throw new Error('PDF has no pages');
       }
 
-      const scanPages = Math.min(pageCount, maxPagesToScan);
+      const scanPages = maxPagesToScan != null ? Math.min(pageCount, maxPagesToScan) : pageCount;
       const textCandidates: Array<{ pageNumber: number; scored: ReturnType<typeof scorePdfTextForChartPicker> }> = [];
 
       for (let pageNumber = 1; pageNumber <= scanPages; pageNumber += 1) {
@@ -386,6 +386,15 @@ export async function scanPdfChartPageCandidatesForModel(args: {
       for (const candidate of textCandidates.slice(0, primaryLimit)) {
         if (candidates.length >= candidateLimit) break;
         pushCandidate(candidate.pageNumber);
+      }
+
+      // Early exit path: once we've scanned all page text, prefer filling the candidate list
+      // from text-ranked pages before paying for raster scoring of additional pages.
+      if (candidates.length < candidateLimit) {
+        for (const candidate of textCandidates.slice(primaryLimit)) {
+          if (candidates.length >= candidateLimit) break;
+          pushCandidate(candidate.pageNumber);
+        }
       }
 
       if (candidates.length < candidateLimit) {

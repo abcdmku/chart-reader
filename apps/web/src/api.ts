@@ -1,5 +1,14 @@
 import type { Config, Job, JobRunDetailsResponse, RowsResponse, StateResponse } from './types';
 
+type DeleteOptions = {
+  deleteCsvData?: boolean;
+};
+
+function deleteQuery(options?: DeleteOptions): string {
+  if (!options?.deleteCsvData) return '';
+  return '?delete_csv_data=1';
+}
+
 export async function getState(signal?: AbortSignal): Promise<StateResponse> {
   const response = await fetch('/api/state', { signal });
   if (!response.ok) throw new Error('Failed to fetch state');
@@ -62,9 +71,14 @@ export async function getJobRunDetails(jobId: string, signal?: AbortSignal): Pro
   return (await response.json()) as JobRunDetailsResponse;
 }
 
-export async function deleteJob(jobId: string): Promise<void> {
-  const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`, { method: 'DELETE' });
+export async function deleteJob(jobId: string, options?: DeleteOptions): Promise<void> {
+  const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}${deleteQuery(options)}`, { method: 'DELETE' });
   if (!response.ok) throw new Error('Failed to delete job');
+}
+
+export async function deleteAllJobs(options?: DeleteOptions): Promise<void> {
+  const response = await fetch(`/api/jobs${deleteQuery(options)}`, { method: 'DELETE' });
+  if (!response.ok) throw new Error('Failed to delete all jobs');
 }
 
 export async function setJobActiveRun(jobId: string, runId: string): Promise<void> {

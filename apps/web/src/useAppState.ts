@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  deleteAllJobs,
   deleteJob,
   getRows,
   getState,
@@ -69,7 +70,8 @@ export type AppState = {
   onRerun: (jobId: string) => Promise<void>;
   onSetPdfPage: (jobId: string, page: number) => Promise<void>;
   onStop: (jobId: string) => Promise<void>;
-  onDelete: (jobId: string) => Promise<void>;
+  onDelete: (jobId: string, deleteCsvData: boolean) => Promise<void>;
+  onDeleteAll: (deleteCsvData: boolean) => Promise<void>;
   onSetActiveRun: (jobId: string, runId: string) => Promise<void>;
 };
 
@@ -297,11 +299,19 @@ export function useAppState(): AppState {
     }
   }, []);
 
-  const onDelete = useCallback(async (jobId: string) => {
-    if (!window.confirm('Delete this job? CSV data will remain.')) return;
+  const onDelete = useCallback(async (jobId: string, deleteCsvData: boolean) => {
     try {
       setError(null);
-      await deleteJob(jobId);
+      await deleteJob(jobId, { deleteCsvData });
+    } catch (e: unknown) {
+      setError((e as Error).message);
+    }
+  }, []);
+
+  const onDeleteAll = useCallback(async (deleteCsvData: boolean) => {
+    try {
+      setError(null);
+      await deleteAllJobs({ deleteCsvData });
     } catch (e: unknown) {
       setError((e as Error).message);
     }
@@ -335,6 +345,7 @@ export function useAppState(): AppState {
     onSetPdfPage,
     onStop,
     onDelete,
+    onDeleteAll,
     onSetActiveRun,
   };
 }

@@ -371,7 +371,9 @@ export class Worker {
         this.setProgress(job.id, 'scanning_pdf_candidates');
 
         const rasterDpi = Number(process.env.PDF_RASTER_DPI ?? process.env.PDF_MODEL_DPI ?? 300) || 300;
-        const maxPagesToScan = Number(process.env.PDF_MAX_PAGES_TO_SCAN ?? 300) || 300;
+        const maxPagesToScanEnv = Number(process.env.PDF_MAX_PAGES_TO_SCAN ?? 0);
+        const maxPagesToScan =
+          Number.isFinite(maxPagesToScanEnv) && maxPagesToScanEnv > 0 ? Math.floor(maxPagesToScanEnv) : undefined;
         const candidateLimit = Number(process.env.PDF_PAGE_CANDIDATES ?? 12) || 12;
 
         if (job.selected_pdf_page == null) {

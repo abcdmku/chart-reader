@@ -126,6 +126,26 @@ function JobProgressBar({ job, avgDurationMs }: { job: Job; avgDurationMs: numbe
 }
 
 const MODEL_OPTIONS = ['gemini-2.5-flash', 'gemini-2-flash', 'gemini-3-flash-preview'] as const;
+const LS_DELETE_ALL_CSV = 'chart-view-delete-all-csv';
+
+function loadDeleteAllCsvPreference(): boolean {
+  try {
+    const raw = localStorage.getItem(LS_DELETE_ALL_CSV);
+    if (!raw) return false;
+    const normalized = raw.trim().toLowerCase();
+    return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on';
+  } catch {
+    return false;
+  }
+}
+
+function saveDeleteAllCsvPreference(value: boolean): void {
+  try {
+    localStorage.setItem(LS_DELETE_ALL_CSV, value ? '1' : '0');
+  } catch {
+    // ignore
+  }
+}
 
 type JobSidebarProps = {
   state: AppState;
@@ -163,6 +183,7 @@ export function JobSidebar({
     onRerun,
     onStop,
     onDelete,
+    onDeleteAll,
   } = state;
 
   const draftModel = configDraft?.model ?? config?.model ?? MODEL_OPTIONS[0];
@@ -173,6 +194,17 @@ export function JobSidebar({
   const liveAvgDurationMs = useMemo(() => estimateAvgDurationMsFromJobs(jobs), [jobs]);
   const effectiveAvgDurationMs = liveAvgDurationMs ?? avgDurationMs;
   const selectedJobIdSet = useMemo(() => new Set(selectedJobIds), [selectedJobIds]);
+  const canDeleteAll = jobs.length > 0 && jobs.every((job) => job.status !== 'processing');
+  const [deleteAllConfirmOpen, setDeleteAllConfirmOpen] = useState(false);
+  const [deleteAllCsvData, setDeleteAllCsvData] = useState<boolean>(() => loadDeleteAllCsvPreference());
+
+  useEffect(() => {
+    saveDeleteAllCsvPreference(deleteAllCsvData);
+  }, [deleteAllCsvData]);
+
+  useEffect(() => {
+    if (!canDeleteAll) setDeleteAllConfirmOpen(false);
+  }, [canDeleteAll]);
 
   return (
     <aside className="flex w-72 shrink-0 flex-col border-r border-zinc-800 bg-zinc-950">
@@ -250,6 +282,58 @@ export function JobSidebar({
           Jobs
           <span className="ml-1.5 text-zinc-700">{sortedJobs.length}</span>
         </span>
+        <div className="relative">
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              setDeleteAllConfirmOpen((prev) => !prev);
+            }}
+            disabled={!canDeleteAll}
+            className="rounded border border-zinc-800 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500 hover:border-red-900 hover:text-red-300 disabled:opacity-40 disabled:hover:border-zinc-800 disabled:hover:text-zinc-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-zinc-400"
+            title={canDeleteAll ? 'Delete all jobs' : 'Stop running jobs before deleting all'}
+            aria-label="Delete all jobs"
+          >
+            Delete all
+          </button>
+          {deleteAllConfirmOpen && canDeleteAll ? (
+            <div
+              className="absolute right-0 top-6 z-20 w-56 rounded-md border border-zinc-700 bg-zinc-900 p-2 shadow-xl"
+              onClick={(e) => e.stopPropagation()}
+              onDoubleClick={(e) => e.stopPropagation()}
+            >
+              <p className="text-[10px] font-medium text-zinc-300">Delete all jobs?</p>
+              <label className="mt-2 flex cursor-pointer items-center gap-2 text-[10px] text-zinc-400">
+                <input
+                  type="checkbox"
+                  checked={deleteAllCsvData}
+                  onChange={(e) => setDeleteAllCsvData(e.currentTarget.checked)}
+                  className="h-3 w-3 rounded border-zinc-600 bg-zinc-950 text-red-500 focus:ring-red-500"
+                />
+                Delete CSV data too (saved)
+              </label>
+              <div className="mt-2 flex justify-end gap-1">
+                <button
+                  type="button"
+                  className="rounded border border-zinc-700 px-2 py-0.5 text-[10px] text-zinc-400 hover:border-zinc-500 hover:text-zinc-200"
+                  onClick={() => setDeleteAllConfirmOpen(false)}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="rounded border border-red-900 bg-red-950/40 px-2 py-0.5 text-[10px] text-red-300 hover:bg-red-900/40"
+                  onClick={() => {
+                    void onDeleteAll(deleteAllCsvData);
+                    setDeleteAllConfirmOpen(false);
+                  }}
+                >
+                  Delete
+                </button>
+              </div>
+            </div>
+          ) : null}
+        </div>
       </div>
 
       {/* Job list */}
@@ -278,7 +362,7 @@ export function JobSidebar({
               }}
               onRerun={() => void onRerun(job.id)}
               onStop={() => void onStop(job.id)}
-              onDelete={() => void onDelete(job.id)}
+              onDelete={(deleteCsvData) => void onDelete(job.id, deleteCsvData)}
               onOpenPdfReview={() => onOpenPdfReview(job.id)}
             />
           ))
@@ -321,7 +405,7 @@ function JobItem({
   onImageClick: () => void;
   onRerun: () => void;
   onStop: () => void;
-  onDelete: () => void;
+  onDelete: (deleteCsvData: boolean) => void;
   onOpenPdfReview: () => void;
 }) {
   const disableRerun = job.status === 'processing' || job.status === 'deleted';
@@ -330,6 +414,12 @@ function JobItem({
   const displayFilename = job.canonical_filename || job.filename;
   const isPdf = isPdfFilename(job.filename);
   const canEditPdfPage = isPdf && job.status !== 'processing' && job.status !== 'deleted';
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  const [deleteCsvData, setDeleteCsvData] = useState(false);
+
+  useEffect(() => {
+    if (disableDelete) setDeleteConfirmOpen(false);
+  }, [disableDelete]);
 
   return (
     <div
@@ -452,7 +542,7 @@ function JobItem({
       </div>
 
       {/* Actions */}
-      <div className="flex shrink-0 flex-col gap-0.5">
+      <div className="relative flex shrink-0 flex-col gap-0.5">
         {canEditPdfPage ? (
           <button
             onClick={(e) => {
@@ -501,7 +591,7 @@ function JobItem({
         <button
           onClick={(e) => {
             e.stopPropagation();
-            onDelete();
+            setDeleteConfirmOpen((prev) => !prev);
           }}
           onDoubleClick={(e) => e.stopPropagation()}
           disabled={disableDelete}
@@ -511,7 +601,45 @@ function JobItem({
         >
           ✕
         </button>
+        {deleteConfirmOpen ? (
+          <div
+            className="absolute right-0 top-14 z-20 w-52 rounded-md border border-zinc-700 bg-zinc-900 p-2 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+            onDoubleClick={(e) => e.stopPropagation()}
+          >
+            <p className="text-[10px] font-medium text-zinc-300">Delete this job?</p>
+            <label className="mt-2 flex cursor-pointer items-center gap-2 text-[10px] text-zinc-400">
+              <input
+                type="checkbox"
+                checked={deleteCsvData}
+                onChange={(e) => setDeleteCsvData(e.currentTarget.checked)}
+                className="h-3 w-3 rounded border-zinc-600 bg-zinc-950 text-red-500 focus:ring-red-500"
+              />
+              Delete CSV data too
+            </label>
+            <div className="mt-2 flex justify-end gap-1">
+              <button
+                type="button"
+                className="rounded border border-zinc-700 px-2 py-0.5 text-[10px] text-zinc-400 hover:border-zinc-500 hover:text-zinc-200"
+                onClick={() => setDeleteConfirmOpen(false)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="rounded border border-red-900 bg-red-950/40 px-2 py-0.5 text-[10px] text-red-300 hover:bg-red-900/40"
+                onClick={() => {
+                  onDelete(deleteCsvData);
+                  setDeleteConfirmOpen(false);
+                }}
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        ) : null}
       </div>
     </div>
   );
 }
+
