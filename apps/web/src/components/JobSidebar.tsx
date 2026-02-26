@@ -10,7 +10,7 @@ function statusDotClass(status: JobStatus): string {
     case 'processing':
       return 'bg-blue-500 animate-pulse';
     case 'awaiting_review':
-      return 'bg-fuchsia-500';
+      return 'bg-yellow-400';
     case 'error':
       return 'bg-red-500';
     case 'cancelled':
