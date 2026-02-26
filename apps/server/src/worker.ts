@@ -8,7 +8,10 @@ import { getConfig, withTransaction } from './db.js';
 import { exportCsv } from './csv.js';
 import { makeUniqueFilename } from './files.js';
 import { extractChartRows, extractMissingChartRows } from './gemini.js';
-import { rasterizePdfChartPageCandidatesForModel } from './pdfRasterize.js';
+import {
+  rasterizePdfPageForModelWithThumbnail,
+  scanPdfChartPageCandidatesForModel,
+} from './pdfRasterize.js';
 import { pdfRasterPreviewFilename, pdfThumbnailFilename } from './pdfPreviewFiles.js';
 import type { FileLocation, Job } from './types.js';
 import { coerceRank } from './utils/coerceRank.js';
@@ -365,78 +368,84 @@ export class Worker {
       if (mimeType === 'application/pdf') {
         const pdfFileData = await fsp.readFile(filePath);
         this.throwIfCancelled(job.id, controller.signal);
-        this.setProgress(job.id, 'rasterizing_pdf');
+        this.setProgress(job.id, 'scanning_pdf_candidates');
 
         const rasterDpi = Number(process.env.PDF_RASTER_DPI ?? process.env.PDF_MODEL_DPI ?? 300) || 300;
-        const maxPagesToScan = Number(process.env.PDF_MAX_PAGES_TO_SCAN ?? 120) || 120;
+        const maxPagesToScan = Number(process.env.PDF_MAX_PAGES_TO_SCAN ?? 300) || 300;
         const candidateLimit = Number(process.env.PDF_PAGE_CANDIDATES ?? 12) || 12;
 
-        const attemptedPages: Array<{ pageNumber: number; charts: string[] }> = [];
-
-        for await (const candidate of rasterizePdfChartPageCandidatesForModel({
-          fileData: pdfFileData,
-          dpi: rasterDpi,
-          abortSignal: controller.signal,
-          maxPagesToScan,
-          candidateLimit,
-        })) {
-          this.throwIfCancelled(job.id, controller.signal);
-
-          const rasterExt = candidate.model.mimeType === 'image/webp' ? 'webp' : 'jpg';
-          const otherRasterExt = rasterExt === 'webp' ? 'jpg' : 'webp';
-          pdfPreviewFiles = {
-            raster: pdfRasterPreviewFilename(job.filename, rasterExt),
-            thumb: pdfThumbnailFilename(job.filename),
-          };
-
-          // Save the raster immediately so the user can view exactly what the model will see,
-          // even while extraction is still running.
-          await Promise.all([
-            fsp.rm(path.join(this.paths.completedDir, pdfRasterPreviewFilename(job.filename, otherRasterExt)), {
-              force: true,
-            }).catch(() => undefined),
-            fsp.writeFile(path.join(this.paths.completedDir, pdfPreviewFiles.raster), candidate.model.fileData),
-            fsp.writeFile(path.join(this.paths.completedDir, pdfPreviewFiles.thumb), candidate.thumbnailJpeg.fileData),
-          ]);
-
-          this.setProgress(job.id, 'extracting');
-
-          const extraction = await extractChartRows({
-            fileData: candidate.model.fileData,
-            mimeType: candidate.model.mimeType,
-            filename: job.filename,
-            model,
+        if (job.selected_pdf_page == null) {
+          const reviewResult = await scanPdfChartPageCandidatesForModel({
+            fileData: pdfFileData,
             abortSignal: controller.signal,
+            maxPagesToScan,
+            candidateLimit,
           });
 
-          const discoDance = filterRowsToDiscoDanceCharts(extraction.result.rows);
-          if (discoDance.mode !== 'none') {
-            initialExtraction = extraction;
-            mergedRows = discoDance.rows;
-            modelFileData = candidate.model.fileData;
-            modelMimeType = candidate.model.mimeType;
-            break;
+          const candidates = Array.from(new Set(reviewResult.candidates)).filter(
+            (value) => Number.isInteger(value) && value >= 1 && value <= reviewResult.pageCount,
+          );
+          const candidateJson = candidates.length > 0 ? JSON.stringify(candidates) : null;
+          const defaultPage = candidates.length > 0 ? candidates[0] : 1;
+
+          if (defaultPage < 1 || reviewResult.pageCount < defaultPage) {
+            throw new Error(`No pages available after scanning ${reviewResult.pageCount} page(s).`);
           }
 
-          const foundCharts = Array.from(
-            new Set(
-              extraction.result.rows.map((r) =>
-                `${r.chartTitle || '(unknown chart)'}${r.chartSection ? ` [${r.chartSection}]` : ''}`,
-              ),
-            ),
-          );
-          attemptedPages.push({ pageNumber: candidate.model.pageNumber, charts: foundCharts.slice(0, 4) });
+          this.db
+            .prepare(
+              `UPDATE jobs
+               SET pdf_review_candidates = ?,
+                   pdf_page_count = ?,
+                   status = 'awaiting_review',
+                   progress_step = 'awaiting_pdf_review',
+                   selected_pdf_page = COALESCE(selected_pdf_page, ?),
+                   error = NULL,
+                   started_at = NULL,
+                   finished_at = NULL
+               WHERE id = ? AND status = 'processing'`,
+            )
+            .run(candidateJson, reviewResult.pageCount, defaultPage, job.id);
+
+          job = this.updateJob(job.id);
+          return;
         }
 
-        if (!initialExtraction || modelFileData == null) {
-          const preview = attemptedPages
-            .slice(0, 6)
-            .map((p) => `p${p.pageNumber}: ${p.charts.join(', ') || '(no charts found)'}`)
-            .join('; ');
+        const selectedPage = job.selected_pdf_page;
+        if (!Number.isInteger(selectedPage) || selectedPage < 1) {
+          throw new Error(`Invalid selected PDF page: ${selectedPage == null ? 'none' : selectedPage}`);
+        }
+        if (job.pdf_page_count != null && selectedPage > job.pdf_page_count) {
           throw new Error(
-            `No DISCO/DANCE chart found in the PDF after scanning ${maxPagesToScan} pages and trying ${attemptedPages.length} candidate page(s).${preview ? ` Found: ${preview}${attemptedPages.length > 6 ? 'â€¦' : ''}` : ''}`,
+            `Invalid selected PDF page: ${selectedPage}. PDF only has ${job.pdf_page_count} pages.`,
           );
         }
+
+        const rasterized = await rasterizePdfPageForModelWithThumbnail({
+          fileData: pdfFileData,
+          pageNumber: selectedPage,
+          dpi: rasterDpi,
+          abortSignal: controller.signal,
+        });
+        this.setProgress(job.id, 'extracting');
+
+        const rasterExt = rasterized.model.mimeType === 'image/webp' ? 'webp' : 'jpg';
+        const otherRasterExt = rasterExt === 'webp' ? 'jpg' : 'webp';
+        pdfPreviewFiles = {
+          raster: pdfRasterPreviewFilename(job.filename, rasterExt),
+          thumb: pdfThumbnailFilename(job.filename),
+        };
+
+        await Promise.all([
+          fsp.rm(path.join(this.paths.completedDir, pdfRasterPreviewFilename(job.filename, otherRasterExt)), {
+            force: true,
+          }).catch(() => undefined),
+          fsp.writeFile(path.join(this.paths.completedDir, pdfPreviewFiles.raster), rasterized.model.fileData),
+          fsp.writeFile(path.join(this.paths.completedDir, pdfPreviewFiles.thumb), rasterized.thumbnailJpeg.fileData),
+        ]);
+
+        modelFileData = rasterized.model.fileData;
+        modelMimeType = rasterized.model.mimeType;
       } else {
         modelFileData = await fsp.readFile(filePath);
       }
@@ -839,3 +848,4 @@ export class Worker {
     }
   }
 }
+

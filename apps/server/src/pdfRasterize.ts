@@ -202,6 +202,15 @@ export function scorePdfTextForChartPicker(rawText: string): {
   return { baseScore, effectiveScore, discoDanceBoost, rankNumbers, textLength };
 }
 
+function looksLikeChartPage(scored: ReturnType<typeof scorePdfTextForChartPicker>): boolean {
+  return scored.baseScore >= 160 || scored.rankNumbers >= 30 || (scored.baseScore >= 110 && scored.rankNumbers >= 18);
+}
+
+export type PdfPageCandidateScanResult = {
+  pageCount: number;
+  candidates: number[];
+};
+
 function scoreChartLikeText(rawText: string): { score: number; textLength: number } {
   const scored = scorePdfTextForChartPicker(rawText);
   return { score: scored.effectiveScore, textLength: scored.textLength };
@@ -244,8 +253,7 @@ async function pickBestChartPageNumber(args: {
       const score = scored.effectiveScore;
       const textLength = scored.textLength;
 
-      const looksLikeChart =
-        scored.baseScore >= 160 || scored.rankNumbers >= 30 || (scored.baseScore >= 110 && scored.rankNumbers >= 18);
+      const looksLikeChart = looksLikeChartPage(scored);
 
       if (
         looksLikeChart &&
@@ -305,6 +313,123 @@ async function pickBestChartPageNumber(args: {
   return { pageNumber: bestImgPage, pageCount };
 }
 
+export async function scanPdfChartPageCandidatesForModel(args: {
+  fileData: Buffer;
+  abortSignal?: AbortSignal;
+  maxPagesToScan?: number;
+  candidateLimit?: number;
+}): Promise<PdfPageCandidateScanResult> {
+  const maxPagesToScan = Math.max(1, args.maxPagesToScan ?? 300);
+  const candidateLimit = Math.max(1, args.candidateLimit ?? 12);
+  throwIfAborted(args.abortSignal);
+
+  const pdfBytes = new Uint8Array(args.fileData);
+  const loadingTask = getDocument({
+    data: pdfBytes,
+    useWorkerFetch: false,
+    isOffscreenCanvasSupported: false,
+    isImageDecoderSupported: false,
+    useSystemFonts: false,
+    disableFontFace: true,
+    ...PDFJS_ASSET_URLS,
+  }) as PdfLoadingTask;
+
+  const onAbort = () => {
+    void loadingTask.destroy().catch(() => undefined);
+  };
+  args.abortSignal?.addEventListener('abort', onAbort, { once: true });
+
+  try {
+    const pdf = await loadingTask.promise;
+    try {
+      const pdfAny = pdf as any;
+      const pageCount = Number(pdfAny.numPages ?? 0);
+      if (!Number.isFinite(pageCount) || pageCount < 1) {
+        throw new Error('PDF has no pages');
+      }
+
+      const scanPages = Math.min(pageCount, maxPagesToScan);
+      const textCandidates: Array<{ pageNumber: number; scored: ReturnType<typeof scorePdfTextForChartPicker> }> = [];
+
+      for (let pageNumber = 1; pageNumber <= scanPages; pageNumber += 1) {
+        throwIfAborted(args.abortSignal);
+        const page = await pdfAny.getPage(pageNumber);
+        try {
+          const rawText = await getPageText(page);
+          const scored = scorePdfTextForChartPicker(rawText);
+          if (looksLikeChartPage(scored)) {
+            textCandidates.push({ pageNumber, scored });
+          }
+        } finally {
+          page.cleanup();
+        }
+      }
+
+      textCandidates.sort((a, b) => {
+        const aPreferred = a.scored.discoDanceBoost > 0 ? 1 : 0;
+        const bPreferred = b.scored.discoDanceBoost > 0 ? 1 : 0;
+        if (aPreferred !== bPreferred) return bPreferred - aPreferred;
+        if (a.scored.effectiveScore !== b.scored.effectiveScore) return b.scored.effectiveScore - a.scored.effectiveScore;
+        if (a.scored.textLength !== b.scored.textLength) return b.scored.textLength - a.scored.textLength;
+        return a.pageNumber - b.pageNumber;
+      });
+
+      const seen = new Set<number>();
+      const candidates: number[] = [];
+      const pushCandidate = (pageNumber: number) => {
+        if (seen.has(pageNumber)) return;
+        seen.add(pageNumber);
+        candidates.push(pageNumber);
+      };
+
+      const primaryLimit = Math.min(candidateLimit, 6);
+      for (const candidate of textCandidates.slice(0, primaryLimit)) {
+        if (candidates.length >= candidateLimit) break;
+        pushCandidate(candidate.pageNumber);
+      }
+
+      if (candidates.length < candidateLimit) {
+        const rasterScores: Array<{ pageNumber: number; score: number }> = [];
+        for (let pageNumber = 1; pageNumber <= scanPages; pageNumber += 1) {
+          if (seen.has(pageNumber)) continue;
+          throwIfAborted(args.abortSignal);
+          const page = await pdfAny.getPage(pageNumber);
+          try {
+            const { canvas } = await renderPdfPageToCanvas({
+              page,
+              requestedDpi: 50,
+              abortSignal: args.abortSignal,
+              maxRenderDimension: 900,
+              maxRenderPixels: 1_200_000,
+            });
+            const score = scoreCanvasForChartLikeContent(canvas);
+            rasterScores.push({ pageNumber, score });
+          } finally {
+            page.cleanup();
+          }
+        }
+
+        rasterScores.sort((a, b) => b.score - a.score || a.pageNumber - b.pageNumber);
+        for (const candidate of rasterScores) {
+          if (candidates.length >= candidateLimit) break;
+          pushCandidate(candidate.pageNumber);
+        }
+      }
+
+      return { pageCount, candidates: candidates.slice(0, candidateLimit) };
+    } finally {
+      await (pdf as any).destroy();
+    }
+  } finally {
+    args.abortSignal?.removeEventListener('abort', onAbort);
+    try {
+      await loadingTask.destroy();
+    } catch {
+      // Ignore cleanup races if the task/document was already destroyed.
+    }
+  }
+}
+
 export async function* rasterizePdfChartPageCandidatesForModel(args: {
   fileData: Buffer;
   dpi?: number;
@@ -313,7 +438,7 @@ export async function* rasterizePdfChartPageCandidatesForModel(args: {
   candidateLimit?: number;
 }): AsyncGenerator<{ model: RasterizedPdfPage; thumbnailJpeg: RasterizedImage }> {
   const requestedDpi = args.dpi ?? DEFAULT_PDF_RASTER_DPI;
-  const maxPagesToScan = Math.max(1, args.maxPagesToScan ?? 120);
+  const maxPagesToScan = Math.max(1, args.maxPagesToScan ?? 200);
   const candidateLimit = Math.max(1, args.candidateLimit ?? 12);
   throwIfAborted(args.abortSignal);
 
@@ -339,9 +464,6 @@ export async function* rasterizePdfChartPageCandidatesForModel(args: {
     scored: ReturnType<typeof scorePdfTextForChartPicker>;
   };
 
-  const looksLikeChart = (scored: ReturnType<typeof scorePdfTextForChartPicker>) =>
-    scored.baseScore >= 160 || scored.rankNumbers >= 30 || (scored.baseScore >= 110 && scored.rankNumbers >= 18);
-
   try {
     const pdf = await loadingTask.promise;
     try {
@@ -356,9 +478,9 @@ export async function* rasterizePdfChartPageCandidatesForModel(args: {
         throwIfAborted(args.abortSignal);
         const page = await pdfAny.getPage(pageNumber);
         try {
-          const rawText = await getPageText(page);
+        const rawText = await getPageText(page);
           const scored = scorePdfTextForChartPicker(rawText);
-          if (!looksLikeChart(scored)) continue;
+          if (!looksLikeChartPage(scored)) continue;
           textCandidates.push({ pageNumber, scored });
         } finally {
           page.cleanup();
@@ -633,6 +755,18 @@ async function rasterizePdfPageInternal(args: {
   dpi?: number;
   abortSignal?: AbortSignal;
 }): Promise<RasterizedPdfPage> {
+  return (await rasterizePdfPageInternalWithCanvas(args)).model;
+}
+
+async function rasterizePdfPageInternalWithCanvas(args: {
+  fileData: Buffer;
+  pageNumber: number;
+  dpi?: number;
+  abortSignal?: AbortSignal;
+}): Promise<{
+  model: RasterizedPdfPage;
+  thumbnailJpeg: RasterizedImage;
+}> {
   const requestedDpi = args.dpi ?? DEFAULT_PDF_RASTER_DPI;
   throwIfAborted(args.abortSignal);
 
@@ -678,13 +812,17 @@ async function rasterizePdfPageInternal(args: {
 
         const model = encodeCanvasAsModelImage(canvas);
 
+        const thumbnailJpeg = makeThumbnailFromCanvas(canvas);
         return {
-          ...model,
-          dpi: actualDpi,
-          pageCount: pdfAny.numPages,
-          pageNumber: args.pageNumber,
-          width,
-          height,
+          model: {
+            ...model,
+            dpi: actualDpi,
+            pageCount: pdfAny.numPages,
+            pageNumber: args.pageNumber,
+            width,
+            height,
+          },
+          thumbnailJpeg,
         };
       } finally {
         page.cleanup();
@@ -700,6 +838,24 @@ async function rasterizePdfPageInternal(args: {
       // Ignore cleanup races if the task/document was already destroyed.
     }
   }
+}
+
+export async function rasterizePdfPageForModel(args: {
+  fileData: Buffer;
+  pageNumber: number;
+  dpi?: number;
+  abortSignal?: AbortSignal;
+}): Promise<RasterizedPdfPage> {
+  return rasterizePdfPageInternal(args);
+}
+
+export async function rasterizePdfPageForModelWithThumbnail(args: {
+  fileData: Buffer;
+  pageNumber: number;
+  dpi?: number;
+  abortSignal?: AbortSignal;
+}): Promise<{ model: RasterizedPdfPage; thumbnailJpeg: RasterizedImage }> {
+  return rasterizePdfPageInternalWithCanvas(args);
 }
 
 export async function rasterizePdfFirstPageForModel(args: {

@@ -1,5 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { deleteJob, getRows, getState, rerunJob, scan, setJobActiveRun, stopJob, updateConfig, uploadFiles } from './api';
+import {
+  deleteJob,
+  getRows,
+  getState,
+  rerunJob,
+  scan,
+  setJobActiveRun,
+  setJobPage,
+  stopJob,
+  updateConfig,
+  uploadFiles,
+} from './api';
 import type { Config, Job, RowsResponse } from './types';
 
 const LS_LATEST_ONLY = 'chart-view-latest-only';
@@ -56,6 +67,7 @@ export type AppState = {
   onSetLatestOnly: (latestOnly: boolean) => Promise<void>;
   onUploadFiles: (files: File[]) => Promise<void>;
   onRerun: (jobId: string) => Promise<void>;
+  onSetPdfPage: (jobId: string, page: number) => Promise<void>;
   onStop: (jobId: string) => Promise<void>;
   onDelete: (jobId: string) => Promise<void>;
   onSetActiveRun: (jobId: string, runId: string) => Promise<void>;
@@ -265,6 +277,16 @@ export function useAppState(): AppState {
     }
   }, []);
 
+  const onSetPdfPage = useCallback(async (jobId: string, page: number) => {
+    try {
+      setError(null);
+      await setJobPage(jobId, page);
+    } catch (e: unknown) {
+      setError((e as Error).message);
+      throw e;
+    }
+  }, []);
+
   const onStop = useCallback(async (jobId: string) => {
     if (!window.confirm('Stop this run?')) return;
     try {
@@ -310,6 +332,7 @@ export function useAppState(): AppState {
     onSetLatestOnly,
     onUploadFiles,
     onRerun,
+    onSetPdfPage,
     onStop,
     onDelete,
     onSetActiveRun,

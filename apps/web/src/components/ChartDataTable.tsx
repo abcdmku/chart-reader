@@ -106,7 +106,21 @@ const defaultColumns = [
   columnHelper.accessor('source_file', {
     id: 'source_file',
     header: 'Source',
-    cell: (info) => <span className="truncate">{info.getValue()}</span>,
+    cell: (info) => {
+      const filename = info.getValue() as string;
+      const fileUrl = `/api/files/${encodeURIComponent(filename)}`;
+      return (
+        <a
+          href={fileUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="truncate text-emerald-400 underline decoration-emerald-400/70 underline-offset-2 transition-colors hover:text-emerald-300"
+          title={filename}
+        >
+          {filename}
+        </a>
+      );
+    },
     minSize: 80,
     size: 140,
   }),

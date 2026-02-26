@@ -4,7 +4,7 @@ export type Config = {
   model: string;
 };
 
-export type JobStatus = 'queued' | 'processing' | 'completed' | 'error' | 'cancelled' | 'deleted';
+export type JobStatus = 'queued' | 'processing' | 'completed' | 'error' | 'cancelled' | 'deleted' | 'awaiting_review';
 export type FileLocation = 'new' | 'completed' | 'missing';
 
 export type Job = {
@@ -24,6 +24,9 @@ export type Job = {
   file_location: FileLocation;
   version_count: number;
   pending_filename: string | null;
+  selected_pdf_page: number | null;
+  pdf_review_candidates: string | null;
+  pdf_page_count: number | null;
 };
 
 export type ChartRow = {

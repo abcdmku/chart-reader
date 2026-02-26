@@ -1,9 +1,10 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+﻿import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { AppState } from '../useAppState';
 import { JobSidebar } from '../components/JobSidebar';
 import { ChartDataTable } from '../components/ChartDataTable';
 import { ImageModal } from '../components/ImageModal';
 import { RunDetailsModal } from '../components/RunDetailsModal';
+import { PdfReviewModal } from '../components/PdfReviewModal';
 
 const ACCEPTED_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'application/pdf']);
 
@@ -14,7 +15,9 @@ export function Dashboard({ state }: { state: AppState }) {
   const [selectionAnchorJobId, setSelectionAnchorJobId] = useState<string | null>(null);
   const [modalImage, setModalImage] = useState<string | null>(null);
   const [runDetailsJobId, setRunDetailsJobId] = useState<string | null>(null);
+  const [reviewJobId, setReviewJobId] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
+  const suppressNextReviewCloseRef = useRef(false);
   const dragCounter = useRef(0);
 
   const {
@@ -26,6 +29,7 @@ export function Dashboard({ state }: { state: AppState }) {
     onUploadFiles,
     onSetLatestOnly,
     onSetActiveRun,
+    onSetPdfPage,
   } = state;
 
   const handleDrop = useCallback(
@@ -65,6 +69,10 @@ export function Dashboard({ state }: { state: AppState }) {
     [jobs],
   );
   const sortedJobIds = useMemo(() => sortedJobs.map((job) => job.id), [sortedJobs]);
+  const reviewQueueJobIds = useMemo(
+    () => sortedJobs.filter((job) => job.status === 'awaiting_review' && /\.pdf$/i.test(job.filename)).map((job) => job.id),
+    [sortedJobs],
+  );
 
   useEffect(() => {
     const validJobIds = new Set(jobs.map((job) => job.id));
@@ -83,6 +91,28 @@ export function Dashboard({ state }: { state: AppState }) {
     return rows.filter((row) => selected.has(row.job_id));
   }, [rows, selectedJobIds]);
   const filteredTotalRows = selectedJobIds.length === 0 ? totalRows : filteredRows.length;
+  const reviewJob = useMemo(() => jobs.find((job) => job.id === reviewJobId) ?? null, [jobs, reviewJobId]);
+  const handlePdfReviewClose = useCallback(() => {
+    if (suppressNextReviewCloseRef.current) {
+      suppressNextReviewCloseRef.current = false;
+      return;
+    }
+    setReviewJobId(null);
+  }, []);
+  const handleSetPdfPageAndAdvance = useCallback(
+    async (jobId: string, page: number) => {
+      const currentIndex = reviewQueueJobIds.indexOf(jobId);
+      const nextReviewJobId = currentIndex >= 0 ? reviewQueueJobIds[currentIndex + 1] ?? null : null;
+
+      await onSetPdfPage(jobId, page);
+
+      if (nextReviewJobId) {
+        suppressNextReviewCloseRef.current = true;
+        setReviewJobId(nextReviewJobId);
+      }
+    },
+    [onSetPdfPage, reviewQueueJobIds],
+  );
 
   // List of filenames for modal navigation (sorted same as sidebar)
   const previewFilenames = useMemo(
@@ -179,6 +209,7 @@ export function Dashboard({ state }: { state: AppState }) {
           onClearSelection={handleClearJobSelection}
           onOpenRunDetails={setRunDetailsJobId}
           onImageClick={setModalImage}
+          onOpenPdfReview={(jobId) => setReviewJobId(jobId)}
         />
         <main className="flex flex-1 flex-col overflow-hidden">
           <ChartDataTable
@@ -199,6 +230,12 @@ export function Dashboard({ state }: { state: AppState }) {
       />
 
       <RunDetailsModal jobId={runDetailsJobId} onClose={() => setRunDetailsJobId(null)} onSetActiveRun={onSetActiveRun} />
+
+      <PdfReviewModal
+        job={reviewJob}
+        onClose={handlePdfReviewClose}
+        onSetPdfPage={handleSetPdfPageAndAdvance}
+      />
     </div>
   );
 }

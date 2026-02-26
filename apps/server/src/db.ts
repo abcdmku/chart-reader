@@ -61,7 +61,10 @@ export function migrate(db: Db): void {
       rows_appended_last_run INTEGER NULL,
       file_location TEXT NOT NULL,
       version_count INTEGER NOT NULL DEFAULT 1,
-      pending_filename TEXT NULL
+      pending_filename TEXT NULL,
+      selected_pdf_page INTEGER NULL,
+      pdf_review_candidates TEXT NULL,
+      pdf_page_count INTEGER NULL
     );
 
     CREATE TABLE IF NOT EXISTS runs (
@@ -133,6 +136,15 @@ function migrateJobsTable(db: Db): void {
   }
   if (!columns.has('pending_filename')) {
     db.exec(`ALTER TABLE jobs ADD COLUMN pending_filename TEXT NULL;`);
+  }
+  if (!columns.has('selected_pdf_page')) {
+    db.exec(`ALTER TABLE jobs ADD COLUMN selected_pdf_page INTEGER NULL;`);
+  }
+  if (!columns.has('pdf_review_candidates')) {
+    db.exec(`ALTER TABLE jobs ADD COLUMN pdf_review_candidates TEXT NULL;`);
+  }
+  if (!columns.has('pdf_page_count')) {
+    db.exec(`ALTER TABLE jobs ADD COLUMN pdf_page_count INTEGER NULL;`);
   }
 
   db.exec('CREATE INDEX IF NOT EXISTS idx_jobs_canonical_filename ON jobs(canonical_filename);');

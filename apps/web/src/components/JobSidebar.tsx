@@ -9,6 +9,8 @@ function statusDotClass(status: JobStatus): string {
       return 'bg-emerald-500';
     case 'processing':
       return 'bg-blue-500 animate-pulse';
+    case 'awaiting_review':
+      return 'bg-fuchsia-500';
     case 'error':
       return 'bg-red-500';
     case 'cancelled':
@@ -33,7 +35,9 @@ function isPdfFilename(filename: string): boolean {
 const STEP_LABELS: Record<string, string> = {
   starting: 'Starting',
   validating_file: 'Validating',
+  scanning_pdf_candidates: 'Scanning PDF candidates',
   rasterizing_pdf: 'Selecting page + rasterizing PDF',
+  awaiting_pdf_review: 'Review PDF page',
   extracting: 'Extracting',
   validating_extraction: 'Checking rows',
   extracting_missing_ranks: 'Re-extracting missing rows',
@@ -133,6 +137,7 @@ type JobSidebarProps = {
   onClearSelection: () => void;
   onOpenRunDetails: (jobId: string) => void;
   onImageClick: (filename: string) => void;
+  onOpenPdfReview: (jobId: string) => void;
 };
 
 export function JobSidebar({
@@ -142,8 +147,23 @@ export function JobSidebar({
   onClearSelection,
   onOpenRunDetails,
   onImageClick,
+  onOpenPdfReview,
 }: JobSidebarProps) {
-  const { config, jobs, avgDurationMs, rowsState, uploading, onUploadFiles, configDraft, onSetConcurrency, onSetModel, onTogglePause, onRerun, onStop, onDelete } = state;
+  const {
+    config,
+    jobs,
+    avgDurationMs,
+    rowsState,
+    uploading,
+    onUploadFiles,
+    configDraft,
+    onSetConcurrency,
+    onSetModel,
+    onTogglePause,
+    onRerun,
+    onStop,
+    onDelete,
+  } = state;
 
   const draftModel = configDraft?.model ?? config?.model ?? MODEL_OPTIONS[0];
   const sortedJobs = useMemo(
@@ -259,6 +279,7 @@ export function JobSidebar({
               onRerun={() => void onRerun(job.id)}
               onStop={() => void onStop(job.id)}
               onDelete={() => void onDelete(job.id)}
+              onOpenPdfReview={() => onOpenPdfReview(job.id)}
             />
           ))
         )}
@@ -290,6 +311,7 @@ function JobItem({
   onRerun,
   onStop,
   onDelete,
+  onOpenPdfReview,
 }: {
   job: Job;
   avgDurationMs: number | null;
@@ -300,12 +322,14 @@ function JobItem({
   onRerun: () => void;
   onStop: () => void;
   onDelete: () => void;
+  onOpenPdfReview: () => void;
 }) {
   const disableRerun = job.status === 'processing' || job.status === 'deleted';
   const disableDelete = job.status === 'processing' || job.status === 'deleted';
   const showStop = job.status === 'processing';
   const displayFilename = job.canonical_filename || job.filename;
   const isPdf = isPdfFilename(job.filename);
+  const canEditPdfPage = isPdf && job.status !== 'processing' && job.status !== 'deleted';
 
   return (
     <div
@@ -406,7 +430,6 @@ function JobItem({
           {chartLabel(displayFilename)}
         </div>
         <div className="mt-0.5 flex items-center gap-2 text-xs text-zinc-600">
-          <span>{job.status}</span>
           {job.pending_filename ? <span>· pending upload</span> : null}
           {job.rows_appended_last_run != null ? (
             <span>· {job.rows_appended_last_run} rows</span>
@@ -430,6 +453,23 @@ function JobItem({
 
       {/* Actions */}
       <div className="flex shrink-0 flex-col gap-0.5">
+        {canEditPdfPage ? (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onOpenPdfReview();
+            }}
+            onDoubleClick={(e) => e.stopPropagation()}
+            className="rounded border border-emerald-800 bg-emerald-900/20 px-1.5 py-0.5 text-[10px] font-medium text-emerald-200 hover:bg-emerald-900/40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-zinc-400"
+            aria-label="Choose PDF page"
+            title="Choose PDF page"
+          >
+            {job.status === 'awaiting_review'
+              ? `Review${job.selected_pdf_page != null ? ` ${job.selected_pdf_page}` : ''}`
+              : `Page${job.selected_pdf_page != null ? ` ${job.selected_pdf_page}` : ''}`}
+          </button>
+        ) : null}
+
         {showStop ? (
           <button
             onClick={(e) => {

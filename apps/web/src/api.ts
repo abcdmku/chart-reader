@@ -1,4 +1,4 @@
-import type { Config, JobRunDetailsResponse, RowsResponse, StateResponse } from './types';
+import type { Config, Job, JobRunDetailsResponse, RowsResponse, StateResponse } from './types';
 
 export async function getState(signal?: AbortSignal): Promise<StateResponse> {
   const response = await fetch('/api/state', { signal });
@@ -74,5 +74,16 @@ export async function setJobActiveRun(jobId: string, runId: string): Promise<voi
     body: JSON.stringify({ run_id: runId }),
   });
   if (!response.ok) throw new Error('Failed to set active run');
+}
+
+export async function setJobPage(jobId: string, page: number): Promise<Job> {
+  const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/page`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ page }),
+  });
+  if (!response.ok) throw new Error('Failed to set page');
+  const payload = (await response.json()) as { job: Job };
+  return payload.job;
 }
 

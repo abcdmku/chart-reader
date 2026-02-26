@@ -106,7 +106,7 @@ const upload = multer({
     const mimeOk = isSupportedUploadMimeType(file.mimetype);
     cb(null, extOk && mimeOk);
   },
-  limits: { files: 200 },
+  limits: { files: 1000 },
 });
 
 const app = express();
@@ -270,21 +270,24 @@ app.post('/api/upload', upload.array('files'), async (req, res) => {
       }
 
       const priorFilename = existing.filename;
-      db.prepare(
-        `UPDATE jobs
-         SET status = ?,
-             progress_step = ?,
-             error = ?,
-             started_at = NULL,
-             finished_at = ?,
-             filename = ?,
+        db.prepare(
+          `UPDATE jobs
+           SET status = ?,
+               progress_step = ?,
+               error = ?,
+               selected_pdf_page = NULL,
+               pdf_review_candidates = NULL,
+               pdf_page_count = NULL,
+               started_at = NULL,
+               finished_at = ?,
+               filename = ?,
              canonical_filename = ?,
              entry_date = ?,
              file_location = 'new',
              version_count = version_count + 1,
              pending_filename = NULL
          WHERE id = ?`,
-      ).run(status, progressStep, error, finishedAt, file.filename, canonicalFilename, entryDate, existing.id);
+        ).run(status, progressStep, error, finishedAt, file.filename, canonicalFilename, entryDate, existing.id);
 
       const updated = db.prepare('SELECT * FROM jobs WHERE id = ?').get(existing.id) as Job;
       sse.send('job', updated);
@@ -339,6 +342,55 @@ app.post('/api/jobs/:id/rerun', (req, res) => {
 
   void worker.tick();
   res.json({ ok: true });
+});
+
+app.post('/api/jobs/:id/page', (req, res) => {
+  const jobId = req.params.id;
+  const body = (req.body ?? {}) as { page?: unknown };
+  const page = Number(body.page);
+  if (!Number.isInteger(page) || page < 1) {
+    res.status(400).json({ error: 'page must be a positive integer' });
+    return;
+  }
+
+  const job = db.prepare('SELECT * FROM jobs WHERE id = ?').get(jobId) as Job | undefined;
+  if (!job) {
+    res.status(404).json({ error: 'job not found' });
+    return;
+  }
+  if (!/\.pdf$/i.test(job.filename)) {
+    res.status(400).json({ error: 'Not a PDF job' });
+    return;
+  }
+  if (job.status === 'processing') {
+    res.status(409).json({ error: 'job is processing' });
+    return;
+  }
+  if (job.status === 'deleted') {
+    res.status(400).json({ error: 'job is deleted' });
+    return;
+  }
+  if (job.pdf_page_count != null && page > job.pdf_page_count) {
+    res.status(400).json({ error: `page must be between 1 and ${job.pdf_page_count}` });
+    return;
+  }
+
+  db.prepare(
+    `UPDATE jobs
+     SET selected_pdf_page = ?,
+         status = 'queued',
+         progress_step = NULL,
+         error = NULL,
+         started_at = NULL,
+         finished_at = NULL
+     WHERE id = ? AND status <> 'processing' AND status <> 'deleted'`,
+  ).run(page, jobId);
+
+  const updated = db.prepare('SELECT * FROM jobs WHERE id = ?').get(jobId) as Job;
+  sse.send('job', updated);
+
+  void worker.tick();
+  res.json({ job: updated });
 });
 
 app.post('/api/jobs/:id/stop', (req, res) => {
